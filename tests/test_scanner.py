@@ -5,9 +5,17 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from cashbox.cli import run_live_scan_loop
-from cashbox.models import BasketLegSnapshot, BinaryMarketSnapshot, FeeSchedule, NegRiskEventSnapshot, RiskBuffer, TopOfBook
+from cashbox.models import (
+    BasketLegSnapshot,
+    BinaryMarketSnapshot,
+    FeeSchedule,
+    MakerRiskBuffer,
+    NegRiskEventSnapshot,
+    RiskBuffer,
+    TopOfBook,
+)
 from cashbox.polymarket import _best_level, _parse_binary_market, _parse_neg_risk_event
-from cashbox.scanner import scan_market, scan_neg_risk_event, scan_snapshots
+from cashbox.scanner import scan_maker_quotes, scan_market, scan_neg_risk_event, scan_snapshots
 
 
 class ScannerTests(unittest.TestCase):
@@ -51,6 +59,75 @@ class ScannerTests(unittest.TestCase):
         )
 
         opportunities = scan_market(market)
+
+        self.assertEqual(opportunities, [])
+
+    def test_snapshot_parses_optional_fair_yes(self) -> None:
+        market = BinaryMarketSnapshot.from_dict(
+            {
+                "market_id": "market-fair",
+                "category": "crypto",
+                "fair_yes": "0.62",
+                "yes": {"bid": "0.58", "ask": "0.60", "bid_size": "100", "ask_size": "100"},
+                "no": {"bid": "0.37", "ask": "0.382", "bid_size": "100", "ask_size": "100"},
+            }
+        )
+
+        self.assertEqual(market.fair_yes, Decimal("0.62"))
+
+    def test_detects_positive_maker_quote_when_fair_edge_survives_buffers(self) -> None:
+        market = BinaryMarketSnapshot.from_dict(
+            {
+                "market_id": "maker-market",
+                "category": "crypto",
+                "fair_yes": "0.62",
+                "yes": {"bid": "0.58", "ask": "0.60", "bid_size": "100", "ask_size": "100"},
+                "no": {"bid": "0.37", "ask": "0.382", "bid_size": "100", "ask_size": "100"},
+            }
+        )
+
+        opportunities = scan_maker_quotes(
+            market,
+            fees=FeeSchedule(taker_fee_rate=Decimal("0.072"), maker_rebate_rate=Decimal("0.01")),
+            risk=MakerRiskBuffer.from_values(
+                adverse_selection="0.008",
+                inventory_penalty="0.003",
+                operational_buffer="0.002",
+                min_edge="0.001",
+            ),
+            quantity=Decimal("25"),
+        )
+
+        self.assertEqual(len(opportunities), 1)
+        opportunity = opportunities[0]
+        self.assertEqual(opportunity.side, "make_yes_bid")
+        self.assertEqual(opportunity.quantity, Decimal("25"))
+        self.assertEqual(opportunity.gross_edge_per_share, Decimal("0.04"))
+        self.assertEqual(opportunity.net_edge_per_share, Decimal("0.028436"))
+        self.assertEqual(opportunity.expected_pnl, Decimal("0.710900"))
+        self.assertEqual(opportunity.detail, "quote=0.58 fair=0.62")
+
+    def test_maker_quotes_require_fair_value(self) -> None:
+        market = BinaryMarketSnapshot.from_dict(
+            {
+                "market_id": "maker-market",
+                "category": "crypto",
+                "yes": {"bid": "0.58", "ask": "0.60", "bid_size": "100", "ask_size": "100"},
+                "no": {"bid": "0.37", "ask": "0.382", "bid_size": "100", "ask_size": "100"},
+            }
+        )
+
+        opportunities = scan_maker_quotes(
+            market,
+            fees=FeeSchedule(taker_fee_rate=Decimal("0.072"), maker_rebate_rate=Decimal("0.01")),
+            risk=MakerRiskBuffer.from_values(
+                adverse_selection="0.008",
+                inventory_penalty="0.003",
+                operational_buffer="0.002",
+                min_edge="0.001",
+            ),
+            quantity=Decimal("25"),
+        )
 
         self.assertEqual(opportunities, [])
 

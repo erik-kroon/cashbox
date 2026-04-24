@@ -2,6 +2,7 @@
   {
     "market_id": "btc-above-100k-today",
     "category": "crypto",
+    "fair_yes": "0.58",
     "yes": {
       "bid": "0.53",
       "ask": "0.54",
@@ -18,6 +19,7 @@
   {
     "market_id": "fed-cuts-before-july",
     "category": "politics",
+    "fair_yes": "0.49",
     "yes": {
       "bid": "0.51",
       "ask": "0.54",
