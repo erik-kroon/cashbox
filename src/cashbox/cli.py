@@ -16,6 +16,7 @@ from .experiments import (
 from .gateway import AgentGatewayError, build_agent_gateway
 from .ingest import FileSystemMarketStore, ingest_polymarket_markets
 from .models import MarketFilter, parse_datetime
+from .paper import PaperServiceError, build_paper_service
 from .research import ResearchMarketReadPath
 
 
@@ -149,6 +150,34 @@ def build_parser() -> argparse.ArgumentParser:
     promotion.add_argument("--min-distinct-markets", type=int, default=25)
     promotion.add_argument("--max-drawdown-limit-usd")
 
+    start_paper = subparsers.add_parser(
+        "start-paper-strategy",
+        help="Start a paper-trading run from post-backtest market history and persist drift metrics.",
+    )
+    start_paper.add_argument("experiment_id")
+    start_paper.add_argument("--run-id")
+    start_paper.add_argument("--started-by", default="paper-executor")
+
+    stop_paper = subparsers.add_parser(
+        "stop-paper-strategy",
+        help="Stop the active paper run for an experiment and finalize paper-promotion state.",
+    )
+    stop_paper.add_argument("experiment_id")
+    stop_paper.add_argument("--stopped-by", default="paper-executor")
+
+    paper_state = subparsers.add_parser("get-paper-state", help="Read the latest paper-trading state for an experiment.")
+    paper_state.add_argument("experiment_id")
+
+    paper_results = subparsers.add_parser("get-paper-results", help="Read persisted results for a paper run.")
+    paper_results.add_argument("paper_run_id")
+
+    paper_drift = subparsers.add_parser(
+        "analyze-paper-vs-backtest-drift",
+        help="Read the persisted paper-vs-backtest drift report for an experiment.",
+    )
+    paper_drift.add_argument("experiment_id")
+    paper_drift.add_argument("--paper-run-id")
+
     credential = subparsers.add_parser(
         "issue-agent-credential",
         help="Issue a scoped credential for the read-only agent gateway.",
@@ -180,6 +209,7 @@ def main() -> int:
     experiments = build_experiment_service(args.root)
     backtests = build_backtest_service(args.root)
     evaluator = build_evaluator_service(args.root)
+    paper = build_paper_service(args.root)
 
     if args.command == "ingest-file":
         payload = json.loads(args.input.read_text())
@@ -396,6 +426,56 @@ def main() -> int:
                 max_drawdown_limit_usd=args.max_drawdown_limit_usd,
             )
         except (BacktestServiceError, EvaluationServiceError, ExperimentServiceError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "start-paper-strategy":
+        try:
+            result = paper.start_paper_strategy(
+                args.experiment_id,
+                run_id=args.run_id,
+                started_by=args.started_by,
+            )
+        except (BacktestServiceError, ExperimentServiceError, PaperServiceError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "stop-paper-strategy":
+        try:
+            result = paper.stop_paper_strategy(
+                args.experiment_id,
+                stopped_by=args.stopped_by,
+            )
+        except (ExperimentServiceError, PaperServiceError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "get-paper-state":
+        try:
+            result = paper.get_paper_state(args.experiment_id)
+        except PaperServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "get-paper-results":
+        try:
+            result = paper.get_paper_results(args.paper_run_id)
+        except PaperServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "analyze-paper-vs-backtest-drift":
+        try:
+            result = paper.analyze_paper_vs_backtest_drift(
+                args.experiment_id,
+                paper_run_id=args.paper_run_id,
+            )
+        except PaperServiceError as exc:
             parser.error(str(exc))
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

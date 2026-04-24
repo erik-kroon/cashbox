@@ -93,6 +93,7 @@ The repository now also includes:
 - input sanitization and append-only audit logs for each gateway call
 - a filesystem-backed experiment service for templates, validation, creation, cloning, and lifecycle tracking
 - a filesystem-backed backtest service that replays point-in-time market history and models fees, latency, slippage, staleness, and partial fills deterministically
+- a filesystem-backed paper-trading service that replays post-backtest history, measures fill drift, and persists paper run state
 
 ## Local Usage
 
@@ -173,17 +174,29 @@ cashbox check-promotion-eligibility <experiment-id> --target-stage paper
 cashbox check-promotion-eligibility <experiment-id> --target-stage paper --promote-if-eligible
 ```
 
+Start a paper run, inspect drift, and finalize the paper stage:
+
+```bash
+cashbox start-paper-strategy <experiment-id> --run-id <run-id>
+cashbox get-paper-state <experiment-id>
+cashbox get-paper-results <paper-run-id>
+cashbox analyze-paper-vs-backtest-drift <experiment-id>
+cashbox stop-paper-strategy <experiment-id>
+```
+
 ## Repository Layout
 
 - `docs/prd.md`: target product and architecture definition
 - `src/cashbox/backtests.py`: deterministic backtest execution, artifacts, and failure explanations
 - `src/cashbox/evaluator.py`: experiment scoring and deterministic paper-promotion gates
+- `src/cashbox/paper.py`: paper-trading runs, state transitions, and backtest drift analysis
 - `src/cashbox/ingest.py`: raw and normalized market ingest
 - `src/cashbox/research.py`: deterministic research read path
 - `src/cashbox/experiments.py`: experiment registry, immutable configs, and lifecycle tracking
 - `src/cashbox/models.py`: normalized market and dataset models
 - `src/cashbox/cli.py`: local ingest and read CLI
 - `tests/test_backtests.py`: deterministic backtest coverage
+- `tests/test_paper.py`: paper-trading and drift-report coverage
 - `tests/test_market_data.py`: first-slice coverage
 - `tests/test_experiments.py`: experiment registry coverage
 
