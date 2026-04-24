@@ -1,6 +1,6 @@
 # Cashbox
 
-Cashbox is a small, deterministic scanner for binary prediction-market full-set arbitrage.
+Cashbox is a small, deterministic scanner for prediction-market constraint arbitrage.
 
 The first slice is intentionally narrow:
 
@@ -8,9 +8,9 @@ The first slice is intentionally narrow:
 - no forecasting model
 - no market making
 
-It only answers one question:
+It currently answers two read-only questions:
 
-> Given a snapshot of YES/NO top-of-book quotes, do the hard constraints still leave positive expected value after fees and operational buffers?
+> Given public top-of-book quotes, do the hard constraints still leave positive expected value after fees and operational buffers?
 
 ## What It Scans
 
@@ -18,6 +18,10 @@ For each binary market:
 
 - `buy_full_set`: buy YES and NO if `yes_ask + no_ask < 1.00` after fees and buffers
 - `sell_full_set`: sell YES and NO if `yes_bid + no_bid > 1.00` after fees and buffers
+
+For live Polymarket negative-risk events:
+
+- `buy_neg_risk_basket`: buy every YES outcome when the event is an exhaustive threshold-ordered basket and `sum(yes_ask) < 1.00` after fees and buffers
 
 The scanner models:
 
@@ -117,14 +121,33 @@ scan=12 at=2026-04-24T10:15:00Z opportunities=2
 
 Live polling is resilient to transient per-market fetch failures and ranks opportunities globally by expected PnL before printing them.
 
+Opt in to exhaustive negative-risk basket scans:
+
+```bash
+cashbox-scan \
+  --polymarket-live \
+  --include-neg-risk-baskets \
+  --limit 25 \
+  --slippage 0.002 \
+  --precision-buffer 0.001 \
+  --safety-margin 0.003
+```
+
+The basket path is intentionally conservative:
+
+- live-only for now
+- restricted to `negRisk=true` events from `https://gamma-api.polymarket.com/events`
+- only accepts binary submarkets whose `groupItemThreshold` values form a contiguous `0..N-1` exhaustive ladder
+- buys YES baskets only; it does not try to model conversion or execution risk yet
+
 ## Repo Layout
 
 - `src/cashbox/models.py`: domain models and fee schedules
-- `src/cashbox/scanner.py`: fee-aware full-set arb logic
+- `src/cashbox/scanner.py`: fee-aware full-set and neg-risk basket arb logic
 - `src/cashbox/cli.py`: JSON-driven command-line entrypoint
-- `src/cashbox/polymarket.py`: public Polymarket market and order book ingestion
+- `src/cashbox/polymarket.py`: public Polymarket market, event, and order book ingestion
 - `tests/test_scanner.py`: stdlib `unittest` coverage for fee math and edge detection
 
 ## Next Steps
 
-The natural next iteration is a read-only streaming path, either via Polymarket WebSockets or the Nautilus Polymarket adapter, so the scanner can evaluate near-real-time books instead of polling REST snapshots.
+The next serious step is execution realism: partial-fill modeling, order-intent simulation, and eventually a tiny-size paper executor before any live trading path is added.
