@@ -1,236 +1,118 @@
 from __future__ import annotations
 
 import argparse
+from datetime import timedelta
 import json
-import time
-from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
-from typing import Callable
 
-from .models import BinaryMarketSnapshot, MakerRiskBuffer, RiskBuffer, to_decimal
-from .polymarket import load_live_neg_risk_events, load_live_snapshots
-from .scanner import rank_opportunities, scan_maker_snapshots, scan_neg_risk_events, scan_snapshots
+from .ingest import FileSystemMarketStore, ingest_polymarket_markets
+from .models import MarketFilter, parse_datetime
+from .research import ResearchMarketReadPath
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Scan binary markets for full-set arbitrage.")
-    parser.add_argument("input", nargs="?", type=Path, help="Path to a JSON file of market snapshots.")
-    parser.add_argument(
-        "--polymarket-live",
-        action="store_true",
-        help="Fetch active binary markets from Polymarket public APIs instead of reading a file.",
-    )
-    parser.add_argument("--limit", type=int, default=25, help="How many live markets to request.")
-    parser.add_argument("--offset", type=int, default=0, help="Live-market pagination offset.")
-    parser.add_argument("--category", help="Optional live-market category filter.")
-    parser.add_argument(
-        "--include-neg-risk-baskets",
-        action="store_true",
-        help="Also scan exhaustive negative-risk event baskets from the Polymarket events API.",
-    )
-    parser.add_argument(
-        "--include-maker-quotes",
-        action="store_true",
-        help="Also evaluate passive YES/NO maker quotes for snapshots with a fair_yes value.",
-    )
-    parser.add_argument(
-        "--poll-interval",
-        type=float,
-        default=0.0,
-        help="Seconds to wait between live polls. A positive value keeps scanning until interrupted.",
-    )
-    parser.add_argument(
-        "--max-iterations",
-        type=int,
-        help="Optional cap on live polls. Requires --poll-interval and is mainly useful for testing.",
-    )
-    parser.add_argument("--slippage", default="0", help="Per-share slippage buffer.")
-    parser.add_argument("--precision-buffer", default="0", help="Per-share precision buffer.")
-    parser.add_argument("--safety-margin", default="0", help="Per-share safety margin.")
-    parser.add_argument("--min-edge", default="0", help="Additional required edge per share.")
-    parser.add_argument("--maker-quantity", default="1", help="Per-quote maker size for passive quote evaluation.")
-    parser.add_argument(
-        "--maker-rebate-rate",
-        help="Override the default maker rebate rate for passive quote evaluation.",
-    )
-    parser.add_argument("--adverse-selection", default="0", help="Per-share adverse selection estimate.")
-    parser.add_argument("--inventory-penalty", default="0", help="Per-share inventory penalty.")
-    parser.add_argument("--operational-buffer", default="0", help="Per-share operational buffer.")
-    parser.add_argument("--maker-min-edge", default="0", help="Additional required edge per share for maker quotes.")
+    parser = argparse.ArgumentParser(description="Cashbox market ingest and research read path.")
+    parser.add_argument("--root", type=Path, default=Path(".cashbox/market-data"), help="Storage root.")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    ingest_file = subparsers.add_parser("ingest-file", help="Ingest Polymarket-style market payloads from a JSON file.")
+    ingest_file.add_argument("input", type=Path)
+    ingest_file.add_argument("--source-name", default="polymarket-gamma")
+    ingest_file.add_argument("--received-at", help="Override the ingest receive timestamp in ISO-8601.")
+
+    ingest_live = subparsers.add_parser("ingest-polymarket", help="Fetch and ingest markets from Polymarket Gamma.")
+    ingest_live.add_argument("--limit", type=int, default=100)
+    ingest_live.add_argument("--offset", type=int, default=0)
+    ingest_live.add_argument("--active", choices=("true", "false"))
+    ingest_live.add_argument("--received-at", help="Override the ingest receive timestamp in ISO-8601.")
+
+    active = subparsers.add_parser("list-active-markets", help="List sanitized active markets from the latest dataset.")
+    active.add_argument("--category")
+    active.add_argument("--query")
+    active.add_argument("--limit", type=int)
+    active.add_argument("--include-inactive", action="store_true")
+    active.add_argument("--dataset-id")
+
+    metadata = subparsers.add_parser("get-market-metadata", help="Read sanitized market metadata.")
+    metadata.add_argument("market_id")
+    metadata.add_argument("--dataset-id")
+
+    timeseries = subparsers.add_parser("get-market-timeseries", help="Read append-only market history.")
+    timeseries.add_argument("market_id")
+    timeseries.add_argument("--start")
+    timeseries.add_argument("--end")
+    timeseries.add_argument("--field", action="append", dest="fields")
+
+    health = subparsers.add_parser("get-ingest-health", help="Summarize dataset freshness.")
+    health.add_argument("--dataset-id")
+    health.add_argument("--stale-after-seconds", type=int, default=3600)
     return parser
-
-
-def format_decimal(value: Decimal) -> str:
-    return format(value.quantize(Decimal("0.000001")), "f")
-
-
-def format_opportunity(opportunity, *, rank: int | None = None) -> str:
-    prefix = f"{rank}. " if rank is not None else ""
-    detail = f" {opportunity.detail}" if getattr(opportunity, "detail", None) else ""
-    return (
-        f"{prefix}{opportunity.market_id} {opportunity.side} "
-        f"qty={opportunity.quantity} "
-        f"gross={format_decimal(opportunity.gross_edge_per_share)} "
-        f"net={format_decimal(opportunity.net_edge_per_share)} "
-        f"pnl={format_decimal(opportunity.expected_pnl)}"
-        f"{detail}"
-    )
-
-
-def print_opportunities(opportunities, *, output: Callable[[str], None] = print) -> None:
-    if not opportunities:
-        output("No opportunities found.")
-        return
-
-    for opportunity in opportunities:
-        output(format_opportunity(opportunity))
-
-
-def _format_timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def emit_live_scan_results(
-    opportunities,
-    *,
-    scan_number: int,
-    scanned_at: datetime,
-    output: Callable[[str], None] = print,
-) -> None:
-    output(f"scan={scan_number} at={_format_timestamp(scanned_at)} opportunities={len(opportunities)}")
-    if not opportunities:
-        output("No opportunities found.")
-        return
-
-    for rank, opportunity in enumerate(opportunities, start=1):
-        output(format_opportunity(opportunity, rank=rank))
-
-
-def emit_live_scan_error(
-    error: Exception,
-    *,
-    scan_number: int,
-    scanned_at: datetime,
-    output: Callable[[str], None] = print,
-) -> None:
-    output(f"scan={scan_number} at={_format_timestamp(scanned_at)} status=error error={error}")
-
-
-def run_live_scan_loop(
-    *,
-    risk: RiskBuffer,
-    limit: int,
-    offset: int,
-    category: str | None,
-    include_neg_risk_baskets: bool,
-    poll_interval: float,
-    max_iterations: int | None = None,
-    snapshot_loader: Callable[..., list[BinaryMarketSnapshot]] = load_live_snapshots,
-    neg_risk_loader: Callable[..., list] = load_live_neg_risk_events,
-    output: Callable[[str], None] = print,
-    sleep: Callable[[float], None] = time.sleep,
-    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-) -> int:
-    iteration = 0
-    while True:
-        iteration += 1
-        scanned_at = clock()
-        try:
-            opportunities = scan_snapshots(snapshot_loader(limit=limit, offset=offset, category=category), risk=risk)
-            if include_neg_risk_baskets:
-                opportunities = rank_opportunities(
-                    opportunities
-                    + scan_neg_risk_events(
-                        neg_risk_loader(limit=limit, offset=offset, category=category),
-                        risk=risk,
-                    )
-                )
-            emit_live_scan_results(opportunities, scan_number=iteration, scanned_at=scanned_at, output=output)
-        except Exception as error:
-            emit_live_scan_error(error, scan_number=iteration, scanned_at=scanned_at, output=output)
-
-        if max_iterations is not None and iteration >= max_iterations:
-            return 0
-
-        sleep(poll_interval)
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    if not args.polymarket_live and args.input is None:
-        parser.error("input is required unless --polymarket-live is set")
-    if args.poll_interval < 0:
-        parser.error("--poll-interval must be non-negative")
-    if args.max_iterations is not None and args.max_iterations <= 0:
-        parser.error("--max-iterations must be positive")
-    if not args.polymarket_live and args.poll_interval > 0:
-        parser.error("--poll-interval requires --polymarket-live")
-    if not args.polymarket_live and args.include_neg_risk_baskets:
-        parser.error("--include-neg-risk-baskets requires --polymarket-live")
-    if args.polymarket_live and args.include_maker_quotes:
-        parser.error("--include-maker-quotes currently requires snapshot input with fair_yes values")
-    if args.max_iterations is not None and args.poll_interval <= 0:
-        parser.error("--max-iterations requires a positive --poll-interval")
+    store = FileSystemMarketStore(args.root)
+    read_path = ResearchMarketReadPath(store)
 
-    risk = RiskBuffer.from_values(
-        slippage=args.slippage,
-        precision_buffer=args.precision_buffer,
-        safety_margin=args.safety_margin,
-        min_edge=args.min_edge,
-    )
-
-    if args.polymarket_live:
-        if args.poll_interval > 0:
-            return run_live_scan_loop(
-                risk=risk,
-                limit=args.limit,
-                offset=args.offset,
-                category=args.category,
-                include_neg_risk_baskets=args.include_neg_risk_baskets,
-                poll_interval=args.poll_interval,
-                max_iterations=args.max_iterations,
-            )
-        opportunities = scan_snapshots(
-            load_live_snapshots(limit=args.limit, offset=args.offset, category=args.category),
-            risk=risk,
-        )
-        if args.include_neg_risk_baskets:
-            opportunities = rank_opportunities(
-                opportunities
-                + scan_neg_risk_events(
-                    load_live_neg_risk_events(limit=args.limit, offset=args.offset, category=args.category),
-                    risk=risk,
-                )
-            )
-        print_opportunities(opportunities)
-        return 0
-    else:
+    if args.command == "ingest-file":
         payload = json.loads(args.input.read_text())
-        snapshots = [BinaryMarketSnapshot.from_dict(item) for item in payload]
-        opportunities = scan_snapshots(snapshots, risk=risk)
-        if args.include_maker_quotes:
-            maker_risk = MakerRiskBuffer.from_values(
-                adverse_selection=args.adverse_selection,
-                inventory_penalty=args.inventory_penalty,
-                operational_buffer=args.operational_buffer,
-                min_edge=args.maker_min_edge,
-            )
-            maker_rebate_rate = None if args.maker_rebate_rate is None else to_decimal(args.maker_rebate_rate)
-            opportunities = rank_opportunities(
-                opportunities
-                + scan_maker_snapshots(
-                    snapshots,
-                    risk=maker_risk,
-                    quantity=to_decimal(args.maker_quantity),
-                    maker_rebate_rate=maker_rebate_rate,
-                )
-            )
+        manifest = store.ingest_market_payloads(
+            payload,
+            source_name=args.source_name,
+            received_at=parse_datetime(args.received_at),
+        )
+        print(json.dumps(manifest.to_dict(), indent=2, sort_keys=True))
+        return 0
 
-    print_opportunities(opportunities)
-    return 0
+    if args.command == "ingest-polymarket":
+        active = None if args.active is None else args.active == "true"
+        manifest = ingest_polymarket_markets(
+            store,
+            limit=args.limit,
+            offset=args.offset,
+            active=active,
+            received_at=parse_datetime(args.received_at),
+        )
+        print(json.dumps(manifest.to_dict(), indent=2, sort_keys=True))
+        return 0
 
+    if args.command == "list-active-markets":
+        result = read_path.list_active_markets(
+            MarketFilter(
+                category=args.category,
+                query=args.query,
+                active_only=not args.include_inactive,
+                limit=args.limit,
+            ),
+            dataset_id=args.dataset_id,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+    if args.command == "get-market-metadata":
+        result = read_path.get_market_metadata(args.market_id, dataset_id=args.dataset_id)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "get-market-timeseries":
+        result = read_path.get_market_timeseries(
+            args.market_id,
+            start=parse_datetime(args.start),
+            end=parse_datetime(args.end),
+            fields=args.fields,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "get-ingest-health":
+        result = read_path.get_ingest_health(
+            dataset_id=args.dataset_id,
+            stale_after=timedelta(seconds=args.stale_after_seconds),
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    parser.error(f"unsupported command: {args.command}")
+    return 2

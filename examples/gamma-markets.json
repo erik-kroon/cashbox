@@ -1,0 +1,34 @@
+[
+  {
+    "id": "raw-election-2028",
+    "slug": "election-2028",
+    "eventSlug": "us-election",
+    "question": "Will candidate X win in 2028?",
+    "category": "Politics",
+    "active": true,
+    "closed": false,
+    "archived": false,
+    "enableOrderBook": true,
+    "outcomes": "[\"Yes\", \"No\"]",
+    "clobTokenIds": "[\"election-2028-yes\", \"election-2028-no\"]",
+    "liquidity": "500",
+    "volume": "1000",
+    "endDate": "2028-11-06T00:00:00Z"
+  },
+  {
+    "id": "raw-btc-150k",
+    "slug": "btc-150k",
+    "eventSlug": "btc-price-targets",
+    "question": "Will BTC hit 150k by year end?",
+    "category": "Crypto",
+    "active": true,
+    "closed": false,
+    "archived": false,
+    "enableOrderBook": true,
+    "outcomes": "[\"Yes\", \"No\"]",
+    "clobTokenIds": "[\"btc-150k-yes\", \"btc-150k-no\"]",
+    "liquidity": "900",
+    "volume": "1500",
+    "endDate": "2026-12-31T00:00:00Z"
+  }
+]
