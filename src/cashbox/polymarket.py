@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -138,10 +139,28 @@ def snapshot_from_market(market: PolymarketBinaryMarket) -> BinaryMarketSnapshot
     )
 
 
-def load_live_snapshots(*, limit: int = 50, offset: int = 0, category: str | None = None) -> list[BinaryMarketSnapshot]:
-    snapshots = []
-    for market in list_binary_markets(limit=limit, offset=offset, category=category):
-        snapshot = snapshot_from_market(market)
-        if snapshot is not None:
-            snapshots.append(snapshot)
-    return snapshots
+def load_live_snapshots(
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    category: str | None = None,
+    max_workers: int | None = None,
+) -> list[BinaryMarketSnapshot]:
+    markets = list_binary_markets(limit=limit, offset=offset, category=category)
+    if not markets:
+        return []
+
+    worker_count = max_workers or min(16, len(markets))
+    snapshots_by_market_id: dict[str, BinaryMarketSnapshot] = {}
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_market_id = {executor.submit(snapshot_from_market, market): market.market_id for market in markets}
+        for future in as_completed(future_to_market_id):
+            try:
+                snapshot = future.result()
+            except Exception:
+                continue
+            if snapshot is not None:
+                snapshots_by_market_id[snapshot.market_id] = snapshot
+
+    return [snapshots_by_market_id[market.market_id] for market in markets if market.market_id in snapshots_by_market_id]
