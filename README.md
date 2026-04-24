@@ -95,6 +95,28 @@ This uses:
 
 The loader handles a real API quirk: the CLOB `bids` and `asks` arrays are not guaranteed to arrive best-first, so Cashbox derives top-of-book by price rather than list position.
 
+AFK loop mode keeps polling and prints each scan as a ranked opportunity list:
+
+```bash
+cashbox-scan \
+  --polymarket-live \
+  --limit 25 \
+  --poll-interval 5 \
+  --slippage 0.002 \
+  --precision-buffer 0.001 \
+  --safety-margin 0.003
+```
+
+Example live-loop output:
+
+```text
+scan=12 at=2026-04-24T10:15:00Z opportunities=2
+1. btc-above-100k-today buy_full_set qty=75 gross=0.070000 net=0.028986 pnl=2.173980
+2. fed-cut-in-june sell_full_set qty=40 gross=0.022000 net=0.006100 pnl=0.244000
+```
+
+Live polling is resilient to transient per-market fetch failures and ranks opportunities globally by expected PnL before printing them.
+
 ## Repo Layout
 
 - `src/cashbox/models.py`: domain models and fee schedules

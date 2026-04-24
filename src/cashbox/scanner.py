@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Iterable
 
 from .models import BinaryMarketSnapshot, FeeSchedule, Opportunity, RiskBuffer
 
@@ -69,3 +70,28 @@ def scan_market(
             opportunities.append(opportunity)
 
     return opportunities
+
+
+def rank_opportunities(opportunities: Iterable[Opportunity]) -> list[Opportunity]:
+    return sorted(
+        opportunities,
+        key=lambda opportunity: (
+            -opportunity.expected_pnl,
+            -opportunity.net_edge_per_share,
+            -opportunity.gross_edge_per_share,
+            opportunity.market_id,
+            opportunity.side,
+        ),
+    )
+
+
+def scan_snapshots(
+    snapshots: Iterable[BinaryMarketSnapshot],
+    *,
+    fees: FeeSchedule | None = None,
+    risk: RiskBuffer | None = None,
+) -> list[Opportunity]:
+    opportunities: list[Opportunity] = []
+    for snapshot in snapshots:
+        opportunities.extend(scan_market(snapshot, fees=fees, risk=risk))
+    return rank_opportunities(opportunities)

@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 import unittest
+from datetime import datetime, timezone
 from decimal import Decimal
 
+from cashbox.cli import run_live_scan_loop
 from cashbox.models import BinaryMarketSnapshot, FeeSchedule, RiskBuffer
 from cashbox.polymarket import _best_level, _parse_binary_market
-from cashbox.scanner import scan_market
+from cashbox.scanner import scan_market, scan_snapshots
 
 
 class ScannerTests(unittest.TestCase):
@@ -50,6 +54,29 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(opportunities, [])
 
+    def test_scan_snapshots_ranks_highest_expected_pnl_first(self) -> None:
+        high_pnl = BinaryMarketSnapshot.from_dict(
+            {
+                "market_id": "high-pnl",
+                "category": "geopolitics",
+                "yes": {"bid": "0.40", "ask": "0.44", "bid_size": "100", "ask_size": "80"},
+                "no": {"bid": "0.55", "ask": "0.48", "bid_size": "100", "ask_size": "80"},
+            }
+        )
+        low_pnl = BinaryMarketSnapshot.from_dict(
+            {
+                "market_id": "low-pnl",
+                "category": "geopolitics",
+                "yes": {"bid": "0.45", "ask": "0.47", "bid_size": "20", "ask_size": "10"},
+                "no": {"bid": "0.50", "ask": "0.50", "bid_size": "20", "ask_size": "10"},
+            }
+        )
+
+        opportunities = scan_snapshots([low_pnl, high_pnl])
+
+        self.assertEqual([opportunity.market_id for opportunity in opportunities], ["high-pnl", "low-pnl"])
+        self.assertGreater(opportunities[0].expected_pnl, opportunities[1].expected_pnl)
+
     def test_parse_binary_market_decodes_json_encoded_fields(self) -> None:
         market = _parse_binary_market(
             {
@@ -91,6 +118,64 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(bid, (Decimal("0.52"), Decimal("12")))
         self.assertEqual(ask, (Decimal("0.53"), Decimal("12")))
+
+    def test_live_scan_loop_keeps_running_after_poll_error(self) -> None:
+        high_pnl = BinaryMarketSnapshot.from_dict(
+            {
+                "market_id": "high-pnl",
+                "category": "geopolitics",
+                "yes": {"bid": "0.40", "ask": "0.44", "bid_size": "100", "ask_size": "80"},
+                "no": {"bid": "0.55", "ask": "0.48", "bid_size": "100", "ask_size": "80"},
+            }
+        )
+        low_pnl = BinaryMarketSnapshot.from_dict(
+            {
+                "market_id": "low-pnl",
+                "category": "geopolitics",
+                "yes": {"bid": "0.45", "ask": "0.47", "bid_size": "20", "ask_size": "10"},
+                "no": {"bid": "0.50", "ask": "0.50", "bid_size": "20", "ask_size": "10"},
+            }
+        )
+        outputs: list[str] = []
+        sleeps: list[float] = []
+        scan_times = iter(
+            [
+                datetime(2026, 4, 24, 10, 0, 0, tzinfo=timezone.utc),
+                datetime(2026, 4, 24, 10, 0, 5, tzinfo=timezone.utc),
+            ]
+        )
+        responses = iter([RuntimeError("temporary failure"), [low_pnl, high_pnl]])
+
+        def loader(*, limit: int, offset: int, category: str | None) -> list[BinaryMarketSnapshot]:
+            response = next(responses)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        exit_code = run_live_scan_loop(
+            risk=RiskBuffer(),
+            limit=25,
+            offset=0,
+            category=None,
+            poll_interval=5.0,
+            max_iterations=2,
+            snapshot_loader=loader,
+            output=outputs.append,
+            sleep=sleeps.append,
+            clock=lambda: next(scan_times),
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(sleeps, [5.0])
+        self.assertEqual(
+            outputs,
+            [
+                "scan=1 at=2026-04-24T10:00:00Z status=error error=temporary failure",
+                "scan=2 at=2026-04-24T10:00:05Z opportunities=2",
+                "1. high-pnl buy_full_set qty=80 gross=0.080000 net=0.080000 pnl=6.400000",
+                "2. low-pnl buy_full_set qty=10 gross=0.030000 net=0.030000 pnl=0.300000",
+            ],
+        )
 
 
 if __name__ == "__main__":
