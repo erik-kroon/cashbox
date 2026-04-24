@@ -2,6 +2,7 @@ import unittest
 from decimal import Decimal
 
 from cashbox.models import BinaryMarketSnapshot, FeeSchedule, RiskBuffer
+from cashbox.polymarket import _best_level, _parse_binary_market
 from cashbox.scanner import scan_market
 
 
@@ -48,6 +49,48 @@ class ScannerTests(unittest.TestCase):
         opportunities = scan_market(market)
 
         self.assertEqual(opportunities, [])
+
+    def test_parse_binary_market_decodes_json_encoded_fields(self) -> None:
+        market = _parse_binary_market(
+            {
+                "id": "123",
+                "slug": "example-market",
+                "question": "Example market?",
+                "category": "Politics",
+                "active": True,
+                "closed": False,
+                "enableOrderBook": True,
+                "outcomes": "[\"Yes\", \"No\"]",
+                "clobTokenIds": "[\"yes-token\", \"no-token\"]",
+            }
+        )
+
+        self.assertIsNotNone(market)
+        assert market is not None
+        self.assertEqual(market.market_id, "example-market")
+        self.assertEqual(market.yes_token_id, "yes-token")
+        self.assertEqual(market.no_token_id, "no-token")
+
+    def test_best_level_uses_price_not_array_position(self) -> None:
+        bid = _best_level(
+            [
+                {"price": "0.10", "size": "5"},
+                {"price": "0.52", "size": "12"},
+                {"price": "0.40", "size": "8"},
+            ],
+            side="bid",
+        )
+        ask = _best_level(
+            [
+                {"price": "0.90", "size": "5"},
+                {"price": "0.53", "size": "12"},
+                {"price": "0.72", "size": "8"},
+            ],
+            side="ask",
+        )
+
+        self.assertEqual(bid, (Decimal("0.52"), Decimal("12")))
+        self.assertEqual(ask, (Decimal("0.53"), Decimal("12")))
 
 
 if __name__ == "__main__":

@@ -4,7 +4,6 @@ Cashbox is a small, deterministic scanner for binary prediction-market full-set 
 
 The first slice is intentionally narrow:
 
-- no exchange adapter
 - no execution engine
 - no forecasting model
 - no market making
@@ -78,13 +77,32 @@ Example output:
 btc-above-100k-today buy_full_set qty=75 gross=0.070000 net=0.028986 pnl=2.173980
 ```
 
+Live scan against Polymarket public APIs:
+
+```bash
+cashbox-scan \
+  --polymarket-live \
+  --limit 25 \
+  --slippage 0.002 \
+  --precision-buffer 0.001 \
+  --safety-margin 0.003
+```
+
+This uses:
+
+- `https://gamma-api.polymarket.com/markets` for live market discovery
+- `https://clob.polymarket.com/book` for public order book snapshots
+
+The loader handles a real API quirk: the CLOB `bids` and `asks` arrays are not guaranteed to arrive best-first, so Cashbox derives top-of-book by price rather than list position.
+
 ## Repo Layout
 
 - `src/cashbox/models.py`: domain models and fee schedules
 - `src/cashbox/scanner.py`: fee-aware full-set arb logic
 - `src/cashbox/cli.py`: JSON-driven command-line entrypoint
+- `src/cashbox/polymarket.py`: public Polymarket market and order book ingestion
 - `tests/test_scanner.py`: stdlib `unittest` coverage for fee math and edge detection
 
 ## Next Steps
 
-The natural next iteration is a read-only Polymarket or Nautilus data adapter that converts live order book snapshots into this package's `BinaryMarketSnapshot` model.
+The natural next iteration is a read-only streaming path, either via Polymarket WebSockets or the Nautilus Polymarket adapter, so the scanner can evaluate near-real-time books instead of polling REST snapshots.

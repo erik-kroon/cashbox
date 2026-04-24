@@ -6,12 +6,21 @@ from decimal import Decimal
 from pathlib import Path
 
 from .models import BinaryMarketSnapshot, RiskBuffer
+from .polymarket import load_live_snapshots
 from .scanner import scan_market
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Scan binary markets for full-set arbitrage.")
-    parser.add_argument("input", type=Path, help="Path to a JSON file of market snapshots.")
+    parser.add_argument("input", nargs="?", type=Path, help="Path to a JSON file of market snapshots.")
+    parser.add_argument(
+        "--polymarket-live",
+        action="store_true",
+        help="Fetch active binary markets from Polymarket public APIs instead of reading a file.",
+    )
+    parser.add_argument("--limit", type=int, default=25, help="How many live markets to request.")
+    parser.add_argument("--offset", type=int, default=0, help="Live-market pagination offset.")
+    parser.add_argument("--category", help="Optional live-market category filter.")
     parser.add_argument("--slippage", default="0", help="Per-share slippage buffer.")
     parser.add_argument("--precision-buffer", default="0", help="Per-share precision buffer.")
     parser.add_argument("--safety-margin", default="0", help="Per-share safety margin.")
@@ -26,8 +35,9 @@ def format_decimal(value: Decimal) -> str:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    if not args.polymarket_live and args.input is None:
+        parser.error("input is required unless --polymarket-live is set")
 
-    payload = json.loads(args.input.read_text())
     risk = RiskBuffer.from_values(
         slippage=args.slippage,
         precision_buffer=args.precision_buffer,
@@ -35,7 +45,12 @@ def main() -> int:
         min_edge=args.min_edge,
     )
 
-    snapshots = [BinaryMarketSnapshot.from_dict(item) for item in payload]
+    if args.polymarket_live:
+        snapshots = load_live_snapshots(limit=args.limit, offset=args.offset, category=args.category)
+    else:
+        payload = json.loads(args.input.read_text())
+        snapshots = [BinaryMarketSnapshot.from_dict(item) for item in payload]
+
     total = 0
     for snapshot in snapshots:
         for opportunity in scan_market(snapshot, risk=risk):
