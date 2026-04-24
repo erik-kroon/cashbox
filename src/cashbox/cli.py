@@ -5,6 +5,7 @@ from datetime import timedelta
 import json
 from pathlib import Path
 
+from .backtests import BacktestServiceError, build_backtest_service
 from .experiments import (
     EXPERIMENT_STATUSES,
     ExperimentFilter,
@@ -107,6 +108,26 @@ def build_parser() -> argparse.ArgumentParser:
     transition.add_argument("--changed-by", required=True)
     transition.add_argument("--reason")
 
+    run_backtest = subparsers.add_parser(
+        "run-backtest",
+        help="Execute a deterministic backtest for a validated experiment against its immutable dataset.",
+    )
+    run_backtest.add_argument("experiment_id")
+    run_backtest.add_argument("--dataset-id")
+    run_backtest.add_argument("--assumptions-json", required=True)
+
+    backtest_artifacts = subparsers.add_parser(
+        "get-backtest-artifacts",
+        help="Read persisted artifacts for a backtest run.",
+    )
+    backtest_artifacts.add_argument("run_id")
+
+    backtest_failure = subparsers.add_parser(
+        "explain-backtest-failure",
+        help="Explain why a persisted backtest run failed.",
+    )
+    backtest_failure.add_argument("run_id")
+
     credential = subparsers.add_parser(
         "issue-agent-credential",
         help="Issue a scoped credential for the read-only agent gateway.",
@@ -136,6 +157,7 @@ def main() -> int:
     read_path = ResearchMarketReadPath(store)
     gateway = build_agent_gateway(args.root)
     experiments = build_experiment_service(args.root)
+    backtests = build_backtest_service(args.root)
 
     if args.command == "ingest-file":
         payload = json.loads(args.input.read_text())
@@ -293,6 +315,37 @@ def main() -> int:
                 reason=args.reason,
             )
         except ExperimentServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "run-backtest":
+        try:
+            assumptions = json.loads(args.assumptions_json)
+            result = backtests.run_backtest(
+                args.experiment_id,
+                dataset_id=args.dataset_id,
+                assumptions=assumptions,
+            )
+        except json.JSONDecodeError as exc:
+            parser.error(f"invalid --assumptions-json payload: {exc}")
+        except (BacktestServiceError, ExperimentServiceError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "get-backtest-artifacts":
+        try:
+            result = backtests.get_backtest_artifacts(args.run_id)
+        except BacktestServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "explain-backtest-failure":
+        try:
+            result = backtests.explain_backtest_failure(args.run_id)
+        except BacktestServiceError as exc:
             parser.error(str(exc))
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

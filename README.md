@@ -69,7 +69,7 @@ Planned production components:
 
 ## Current Status
 
-This repository is early and currently implements the first two local vertical slices:
+This repository is early and currently implements the first three local vertical slices:
 
 - append-first ingest of Polymarket Gamma market payloads
 - immutable dataset manifests and normalized market snapshots
@@ -77,6 +77,7 @@ This repository is early and currently implements the first two local vertical s
 - research read APIs for active markets, metadata, timeseries, and ingest health
 - a local agent gateway for approved read-only market tools with audit logging
 - an experiment registry with immutable definitions, append-only lifecycle history, and research notes
+- a deterministic backtest runner with immutable assumptions, persisted artifacts, and failure explanations
 
 That slice exists to support the first two derived user outcomes:
 
@@ -91,6 +92,7 @@ The repository now also includes:
 - credential issuance with per-tool authorization and fixed-window rate limits
 - input sanitization and append-only audit logs for each gateway call
 - a filesystem-backed experiment service for templates, validation, creation, cloning, and lifecycle tracking
+- a filesystem-backed backtest service that replays point-in-time market history and models fees, latency, slippage, staleness, and partial fills deterministically
 
 ## Local Usage
 
@@ -154,14 +156,25 @@ cashbox list-experiments --status VALIDATED_CONFIG
 cashbox get-experiment <experiment-id>
 ```
 
+Run a deterministic backtest and inspect its artifacts:
+
+```bash
+cashbox run-backtest <experiment-id> \
+  --assumptions-json '{"simulation_level":"top_of_book","fee_model_version":"fees-v1","latency_model_version":"latency-v1","slippage_model_version":"slippage-v1","fill_model_version":"fills-v1","tick_size":"0.01","price_precision_dp":4,"quantity_precision_dp":4,"stale_book_threshold_seconds":600,"fee_bps":10,"slippage_bps":5,"latency_seconds":0,"partial_fill_ratio":"0.75","split_method":"chronological","train_ratio":"0.6","validation_ratio":"0.2","test_ratio":"0.2","baseline":"hold"}'
+cashbox get-backtest-artifacts <run-id>
+cashbox explain-backtest-failure <run-id>
+```
+
 ## Repository Layout
 
 - `docs/prd.md`: target product and architecture definition
+- `src/cashbox/backtests.py`: deterministic backtest execution, artifacts, and failure explanations
 - `src/cashbox/ingest.py`: raw and normalized market ingest
 - `src/cashbox/research.py`: deterministic research read path
 - `src/cashbox/experiments.py`: experiment registry, immutable configs, and lifecycle tracking
 - `src/cashbox/models.py`: normalized market and dataset models
 - `src/cashbox/cli.py`: local ingest and read CLI
+- `tests/test_backtests.py`: deterministic backtest coverage
 - `tests/test_market_data.py`: first-slice coverage
 - `tests/test_experiments.py`: experiment registry coverage
 
@@ -169,10 +182,8 @@ cashbox get-experiment <experiment-id>
 
 The next slices after this one are:
 
-1. agent gateway for read-only market tools
-2. experiment registry with immutable configs
-3. deterministic backtest execution
-4. evaluator and paper-promotion gates
-5. paper trading, drift reporting, and execution controls
+1. evaluator and paper-promotion gates
+2. paper trading, drift reporting, and execution controls
+3. trade intent, risk rejection, and controlled live boundaries
 
 The repository should keep moving in that order so the research path grows before any live order path exists.
