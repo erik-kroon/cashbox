@@ -165,10 +165,19 @@ cashbox get-backtest-artifacts <run-id>
 cashbox explain-backtest-failure <run-id>
 ```
 
+Score an experiment and evaluate the paper-promotion gate:
+
+```bash
+cashbox score-experiment <experiment-id>
+cashbox check-promotion-eligibility <experiment-id> --target-stage paper
+cashbox check-promotion-eligibility <experiment-id> --target-stage paper --promote-if-eligible
+```
+
 ## Repository Layout
 
 - `docs/prd.md`: target product and architecture definition
 - `src/cashbox/backtests.py`: deterministic backtest execution, artifacts, and failure explanations
+- `src/cashbox/evaluator.py`: experiment scoring and deterministic paper-promotion gates
 - `src/cashbox/ingest.py`: raw and normalized market ingest
 - `src/cashbox/research.py`: deterministic research read path
 - `src/cashbox/experiments.py`: experiment registry, immutable configs, and lifecycle tracking
