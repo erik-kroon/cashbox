@@ -1,5 +1,15 @@
 """Cashbox market ingest and research read path."""
 
+from .backtests import (
+    BACKTEST_RUN_STATUSES,
+    BACKTEST_SIMULATION_LEVELS,
+    BacktestNotFoundError,
+    BacktestService,
+    BacktestServiceError,
+    BacktestValidationError,
+    FileSystemBacktestStore,
+    build_backtest_service,
+)
 from .experiments import (
     EXPERIMENT_STATUSES,
     STRATEGY_TEMPLATES,
@@ -31,6 +41,8 @@ from .models import IngestHealthReport, MarketDatasetManifest, MarketFilter, Nor
 from .research import ResearchMarketReadPath
 
 __all__ = [
+    "BACKTEST_RUN_STATUSES",
+    "BACKTEST_SIMULATION_LEVELS",
     "EXPERIMENT_STATUSES",
     "AgentAuthenticationError",
     "AgentAuthorizationError",
@@ -39,6 +51,10 @@ __all__ = [
     "AgentInputError",
     "AgentMarketGateway",
     "AgentRateLimitError",
+    "BacktestNotFoundError",
+    "BacktestService",
+    "BacktestServiceError",
+    "BacktestValidationError",
     "ExperimentFilter",
     "ExperimentLifecycleError",
     "ExperimentNotFoundError",
@@ -49,6 +65,7 @@ __all__ = [
     "ExperimentValidationError",
     "FileSystemMarketStore",
     "FileSystemAgentGatewayStore",
+    "FileSystemBacktestStore",
     "FileSystemExperimentStore",
     "IngestHealthReport",
     "MarketDatasetManifest",
@@ -57,6 +74,7 @@ __all__ = [
     "READ_ONLY_TOOL_NAMES",
     "ResearchMarketReadPath",
     "STRATEGY_TEMPLATES",
+    "build_backtest_service",
     "build_agent_gateway",
     "build_experiment_service",
     "ingest_polymarket_markets",
