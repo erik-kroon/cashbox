@@ -75,6 +75,7 @@ This repository is early and currently implements only the first vertical slice:
 - immutable dataset manifests and normalized market snapshots
 - append-only per-market history for point-in-time reads
 - research read APIs for active markets, metadata, timeseries, and ingest health
+- a local agent gateway for approved read-only market tools with audit logging
 
 That slice exists to support the first two derived user outcomes:
 
@@ -82,6 +83,12 @@ That slice exists to support the first two derived user outcomes:
 - an operator can answer basic data-health and read-path questions from stored artifacts
 
 Everything beyond that remains planned work.
+
+The repository now also includes the next slice in local form:
+
+- a scoped agent gateway that exposes only approved read-only market tools
+- credential issuance with per-tool authorization and fixed-window rate limits
+- input sanitization and append-only audit logs for each gateway call
 
 ## Local Usage
 
@@ -112,6 +119,17 @@ cashbox list-active-markets --category politics
 cashbox get-market-metadata election-2028
 cashbox get-market-timeseries election-2028 --field question --field volume
 cashbox get-ingest-health --stale-after-seconds 1800
+```
+
+Issue a local read-only gateway credential and call a tool through the gateway:
+
+```bash
+cashbox issue-agent-credential --subject hermes
+cashbox gateway-call list_active_markets \
+  --token <issued-token> \
+  --user-id hermes \
+  --session-id session-001 \
+  --args-json '{"query":"btc","limit":1}'
 ```
 
 By default, local data is stored under `.cashbox/market-data/`.

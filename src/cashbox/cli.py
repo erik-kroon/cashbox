@@ -5,6 +5,7 @@ from datetime import timedelta
 import json
 from pathlib import Path
 
+from .gateway import AgentGatewayError, build_agent_gateway
 from .ingest import FileSystemMarketStore, ingest_polymarket_markets
 from .models import MarketFilter, parse_datetime
 from .research import ResearchMarketReadPath
@@ -47,6 +48,26 @@ def build_parser() -> argparse.ArgumentParser:
     health = subparsers.add_parser("get-ingest-health", help="Summarize dataset freshness.")
     health.add_argument("--dataset-id")
     health.add_argument("--stale-after-seconds", type=int, default=3600)
+
+    credential = subparsers.add_parser(
+        "issue-agent-credential",
+        help="Issue a scoped credential for the read-only agent gateway.",
+    )
+    credential.add_argument("--subject", required=True)
+    credential.add_argument("--allow-tool", action="append", dest="allowed_tools")
+    credential.add_argument("--rate-limit-count", type=int, default=60)
+    credential.add_argument("--rate-limit-window-seconds", type=int, default=60)
+    credential.add_argument("--token", help="Optional fixed token for local development or tests.")
+
+    gateway_call = subparsers.add_parser(
+        "gateway-call",
+        help="Call a read-only market tool through the scoped agent gateway.",
+    )
+    gateway_call.add_argument("tool_name")
+    gateway_call.add_argument("--token", required=True)
+    gateway_call.add_argument("--args-json", default="{}")
+    gateway_call.add_argument("--user-id", required=True)
+    gateway_call.add_argument("--session-id", required=True)
     return parser
 
 
@@ -55,6 +76,7 @@ def main() -> int:
     args = parser.parse_args()
     store = FileSystemMarketStore(args.root)
     read_path = ResearchMarketReadPath(store)
+    gateway = build_agent_gateway(args.root)
 
     if args.command == "ingest-file":
         payload = json.loads(args.input.read_text())
@@ -114,5 +136,65 @@ def main() -> int:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
         return 0
 
+    if args.command == "issue-agent-credential":
+        credential, raw_token = gateway.issue_read_only_credential(
+            subject=args.subject,
+            allowed_tools=None if args.allowed_tools is None else tuple(args.allowed_tools),
+            rate_limit_count=args.rate_limit_count,
+            rate_limit_window_seconds=args.rate_limit_window_seconds,
+            token=args.token,
+        )
+        print(
+            json.dumps(
+                {
+                    "allowed_tools": list(credential.allowed_tools),
+                    "created_at": credential.created_at,
+                    "credential_id": credential.credential_id,
+                    "rate_limit_count": credential.rate_limit_count,
+                    "rate_limit_window_seconds": credential.rate_limit_window_seconds,
+                    "subject": credential.subject,
+                    "token": raw_token,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    if args.command == "gateway-call":
+        try:
+            tool_arguments = json.loads(args.args_json)
+            result = gateway.call_tool(
+                args.tool_name,
+                tool_arguments,
+                token=args.token,
+                user_id=args.user_id,
+                session_id=args.session_id,
+            )
+        except json.JSONDecodeError as exc:
+            parser.error(f"invalid --args-json payload: {exc}")
+        except AgentGatewayError as exc:
+            print(
+                json.dumps(
+                    {
+                        "error": {
+                            "code": exc.code,
+                            "message": str(exc),
+                        },
+                        "ok": False,
+                        "tool_name": args.tool_name,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 1
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
     parser.error(f"unsupported command: {args.command}")
     return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
