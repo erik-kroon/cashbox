@@ -6,11 +6,15 @@ The first slice is intentionally narrow:
 
 - no execution engine
 - no forecasting model
-- no market making
+- no live market making or order routing
 
 It currently answers two read-only questions:
 
 > Given public top-of-book quotes, do the hard constraints still leave positive expected value after fees and operational buffers?
+
+And one model-driven question for offline snapshots:
+
+> Given a fair probability estimate, do passive YES/NO maker quotes still have positive EV after rebates and maker-specific risk buffers?
 
 ## What It Scans
 
@@ -26,11 +30,19 @@ For live Polymarket negative-risk events:
 The scanner models:
 
 - category-specific taker fee rates
+- optional maker rebate rates
 - fee formula `shares * fee_rate * price * (1 - price)`
 - per-trade slippage buffer
 - precision buffer
 - safety margin
 - available size from top-of-book liquidity
+
+For maker quote evaluation it additionally models:
+
+- optional `fair_yes` probability inputs on snapshots
+- passive quote EV on YES and NO bid/ask joins
+- per-share adverse selection, inventory, and operational buffers
+- configurable maker quote size
 
 ## Install
 
@@ -49,6 +61,7 @@ Pass the CLI a JSON file containing a list of market snapshots:
   {
     "market_id": "btc-above-100k-today",
     "category": "crypto",
+    "fair_yes": "0.62",
     "yes": {
       "bid": "0.53",
       "ask": "0.56",
@@ -78,7 +91,26 @@ cashbox-scan examples/markets.json \
 Example output:
 
 ```text
-btc-above-100k-today buy_full_set qty=75 gross=0.070000 net=0.028986 pnl=2.173980
+btc-above-100k-today buy_full_set qty=75 gross=0.070000 net=0.034986 pnl=2.623980
+```
+
+Model-driven passive quote evaluation from a JSON snapshot file:
+
+```bash
+cashbox-scan examples/markets.json \
+  --include-maker-quotes \
+  --maker-quantity 25 \
+  --maker-rebate-rate 0.01 \
+  --adverse-selection 0.008 \
+  --inventory-penalty 0.003 \
+  --operational-buffer 0.002 \
+  --maker-min-edge 0.001
+```
+
+Example maker output:
+
+```text
+btc-above-100k-today make_yes_bid qty=25 gross=0.050000 net=0.038491 pnl=0.962275 quote=0.53 fair=0.58
 ```
 
 Live scan against Polymarket public APIs:
@@ -140,6 +172,13 @@ The basket path is intentionally conservative:
 - only accepts binary submarkets whose `groupItemThreshold` values form a contiguous `0..N-1` exhaustive ladder
 - buys YES baskets only; it does not try to model conversion or execution risk yet
 
+The maker path is also intentionally conservative:
+
+- file-input only for now
+- requires a `fair_yes` value per snapshot
+- evaluates joining the current best YES/NO bid or ask only
+- does not model queue position, fill probability, or post-only order management yet
+
 ## Repo Layout
 
 - `src/cashbox/models.py`: domain models and fee schedules
@@ -150,4 +189,4 @@ The basket path is intentionally conservative:
 
 ## Next Steps
 
-The next serious step is execution realism: partial-fill modeling, order-intent simulation, and eventually a tiny-size paper executor before any live trading path is added.
+The next serious step is execution realism: queue-position modeling for maker quotes, partial-fill simulation for two-leg arb, and eventually a tiny-size paper executor before any live trading path is added.

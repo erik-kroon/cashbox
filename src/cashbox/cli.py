@@ -8,9 +8,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 
-from .models import BinaryMarketSnapshot, RiskBuffer
+from .models import BinaryMarketSnapshot, MakerRiskBuffer, RiskBuffer, to_decimal
 from .polymarket import load_live_neg_risk_events, load_live_snapshots
-from .scanner import rank_opportunities, scan_neg_risk_events, scan_snapshots
+from .scanner import rank_opportunities, scan_maker_snapshots, scan_neg_risk_events, scan_snapshots
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also scan exhaustive negative-risk event baskets from the Polymarket events API.",
     )
     parser.add_argument(
+        "--include-maker-quotes",
+        action="store_true",
+        help="Also evaluate passive YES/NO maker quotes for snapshots with a fair_yes value.",
+    )
+    parser.add_argument(
         "--poll-interval",
         type=float,
         default=0.0,
@@ -44,6 +49,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--precision-buffer", default="0", help="Per-share precision buffer.")
     parser.add_argument("--safety-margin", default="0", help="Per-share safety margin.")
     parser.add_argument("--min-edge", default="0", help="Additional required edge per share.")
+    parser.add_argument("--maker-quantity", default="1", help="Per-quote maker size for passive quote evaluation.")
+    parser.add_argument(
+        "--maker-rebate-rate",
+        help="Override the default maker rebate rate for passive quote evaluation.",
+    )
+    parser.add_argument("--adverse-selection", default="0", help="Per-share adverse selection estimate.")
+    parser.add_argument("--inventory-penalty", default="0", help="Per-share inventory penalty.")
+    parser.add_argument("--operational-buffer", default="0", help="Per-share operational buffer.")
+    parser.add_argument("--maker-min-edge", default="0", help="Additional required edge per share for maker quotes.")
     return parser
 
 
@@ -155,6 +169,8 @@ def main() -> int:
         parser.error("--poll-interval requires --polymarket-live")
     if not args.polymarket_live and args.include_neg_risk_baskets:
         parser.error("--include-neg-risk-baskets requires --polymarket-live")
+    if args.polymarket_live and args.include_maker_quotes:
+        parser.error("--include-maker-quotes currently requires snapshot input with fair_yes values")
     if args.max_iterations is not None and args.poll_interval <= 0:
         parser.error("--max-iterations requires a positive --poll-interval")
 
@@ -193,8 +209,26 @@ def main() -> int:
     else:
         payload = json.loads(args.input.read_text())
         snapshots = [BinaryMarketSnapshot.from_dict(item) for item in payload]
+        opportunities = scan_snapshots(snapshots, risk=risk)
+        if args.include_maker_quotes:
+            maker_risk = MakerRiskBuffer.from_values(
+                adverse_selection=args.adverse_selection,
+                inventory_penalty=args.inventory_penalty,
+                operational_buffer=args.operational_buffer,
+                min_edge=args.maker_min_edge,
+            )
+            maker_rebate_rate = None if args.maker_rebate_rate is None else to_decimal(args.maker_rebate_rate)
+            opportunities = rank_opportunities(
+                opportunities
+                + scan_maker_snapshots(
+                    snapshots,
+                    risk=maker_risk,
+                    quantity=to_decimal(args.maker_quantity),
+                    maker_rebate_rate=maker_rebate_rate,
+                )
+            )
 
-    print_opportunities(scan_snapshots(snapshots, risk=risk))
+    print_opportunities(opportunities)
     return 0
 
 
