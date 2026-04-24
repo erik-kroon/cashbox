@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from cashbox.cli import run_live_scan_loop
-from cashbox.models import BinaryMarketSnapshot, FeeSchedule, RiskBuffer
-from cashbox.polymarket import _best_level, _parse_binary_market
-from cashbox.scanner import scan_market, scan_snapshots
+from cashbox.models import BasketLegSnapshot, BinaryMarketSnapshot, FeeSchedule, NegRiskEventSnapshot, RiskBuffer, TopOfBook
+from cashbox.polymarket import _best_level, _parse_binary_market, _parse_neg_risk_event
+from cashbox.scanner import scan_market, scan_neg_risk_event, scan_snapshots
 
 
 class ScannerTests(unittest.TestCase):
@@ -54,6 +54,64 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(opportunities, [])
 
+    def test_detects_buy_neg_risk_basket_when_edge_survives_fees_and_buffers(self) -> None:
+        event = NegRiskEventSnapshot(
+            event_id="harvey-weinstein-prison-time",
+            title="Harvey Weinstein prison time?",
+            category="geopolitics",
+            legs=(
+                BasketLegSnapshot(
+                    market_id="bucket-0",
+                    title="No Prison Time",
+                    threshold=0,
+                    yes=TopOfBook(bid=Decimal("0.18"), ask=Decimal("0.18"), bid_size=Decimal("90"), ask_size=Decimal("60")),
+                ),
+                BasketLegSnapshot(
+                    market_id="bucket-1",
+                    title="<5 years",
+                    threshold=1,
+                    yes=TopOfBook(bid=Decimal("0.20"), ask=Decimal("0.21"), bid_size=Decimal("90"), ask_size=Decimal("70")),
+                ),
+                BasketLegSnapshot(
+                    market_id="bucket-2",
+                    title="5-10 years",
+                    threshold=2,
+                    yes=TopOfBook(bid=Decimal("0.17"), ask=Decimal("0.17"), bid_size=Decimal("90"), ask_size=Decimal("80")),
+                ),
+                BasketLegSnapshot(
+                    market_id="bucket-3",
+                    title="10-20 years",
+                    threshold=3,
+                    yes=TopOfBook(bid=Decimal("0.15"), ask=Decimal("0.15"), bid_size=Decimal("90"), ask_size=Decimal("75")),
+                ),
+                BasketLegSnapshot(
+                    market_id="bucket-4",
+                    title="20-30 years",
+                    threshold=4,
+                    yes=TopOfBook(bid=Decimal("0.12"), ask=Decimal("0.12"), bid_size=Decimal("90"), ask_size=Decimal("65")),
+                ),
+                BasketLegSnapshot(
+                    market_id="bucket-5",
+                    title="30+ years",
+                    threshold=5,
+                    yes=TopOfBook(bid=Decimal("0.11"), ask=Decimal("0.11"), bid_size=Decimal("90"), ask_size=Decimal("55")),
+                ),
+            ),
+        )
+
+        opportunities = scan_neg_risk_event(
+            event,
+            risk=RiskBuffer.from_values(slippage="0.002", precision_buffer="0.001", safety_margin="0.003"),
+        )
+
+        self.assertEqual(len(opportunities), 1)
+        opportunity = opportunities[0]
+        self.assertEqual(opportunity.side, "buy_neg_risk_basket")
+        self.assertEqual(opportunity.quantity, Decimal("55"))
+        self.assertEqual(opportunity.net_edge_per_share, Decimal("0.05400"))
+        self.assertEqual(opportunity.expected_pnl, Decimal("2.97000"))
+        self.assertEqual(opportunity.detail, "legs=6")
+
     def test_scan_snapshots_ranks_highest_expected_pnl_first(self) -> None:
         high_pnl = BinaryMarketSnapshot.from_dict(
             {
@@ -97,6 +155,107 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(market.market_id, "example-market")
         self.assertEqual(market.yes_token_id, "yes-token")
         self.assertEqual(market.no_token_id, "no-token")
+
+    def test_parse_neg_risk_event_orders_markets_by_threshold(self) -> None:
+        event = _parse_neg_risk_event(
+            {
+                "id": "24383",
+                "slug": "harvey-weinstein-prison-time",
+                "title": "Harvey Weinstein prison time?",
+                "active": True,
+                "closed": False,
+                "negRisk": True,
+                "markets": [
+                    {
+                        "id": "544094",
+                        "slug": "bucket-2",
+                        "question": "5 to 10 years?",
+                        "category": "Politics",
+                        "active": True,
+                        "closed": False,
+                        "enableOrderBook": True,
+                        "groupItemTitle": "5-10 years",
+                        "groupItemThreshold": "2",
+                        "outcomes": "[\"Yes\", \"No\"]",
+                        "clobTokenIds": "[\"yes-2\", \"no-2\"]",
+                    },
+                    {
+                        "id": "544092",
+                        "slug": "bucket-0",
+                        "question": "No prison time?",
+                        "category": "Politics",
+                        "active": True,
+                        "closed": False,
+                        "enableOrderBook": True,
+                        "groupItemTitle": "No Prison Time",
+                        "groupItemThreshold": "0",
+                        "outcomes": "[\"Yes\", \"No\"]",
+                        "clobTokenIds": "[\"yes-0\", \"no-0\"]",
+                    },
+                    {
+                        "id": "544093",
+                        "slug": "bucket-1",
+                        "question": "Less than 5 years?",
+                        "category": "Politics",
+                        "active": True,
+                        "closed": False,
+                        "enableOrderBook": True,
+                        "groupItemTitle": "<5 years",
+                        "groupItemThreshold": "1",
+                        "outcomes": "[\"Yes\", \"No\"]",
+                        "clobTokenIds": "[\"yes-1\", \"no-1\"]",
+                    },
+                ],
+            }
+        )
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.event_id, "harvey-weinstein-prison-time")
+        self.assertEqual([market.market_id for market in event.markets], ["bucket-0", "bucket-1", "bucket-2"])
+        self.assertEqual([market.group_item_threshold for market in event.markets], [0, 1, 2])
+
+    def test_parse_neg_risk_event_rejects_non_contiguous_thresholds(self) -> None:
+        event = _parse_neg_risk_event(
+            {
+                "id": "broken",
+                "slug": "broken",
+                "title": "Broken",
+                "active": True,
+                "closed": False,
+                "negRisk": True,
+                "markets": [
+                    {
+                        "id": "1",
+                        "slug": "bucket-0",
+                        "question": "Bucket 0?",
+                        "category": "Politics",
+                        "active": True,
+                        "closed": False,
+                        "enableOrderBook": True,
+                        "groupItemTitle": "Bucket 0",
+                        "groupItemThreshold": "0",
+                        "outcomes": "[\"Yes\", \"No\"]",
+                        "clobTokenIds": "[\"yes-0\", \"no-0\"]",
+                    },
+                    {
+                        "id": "2",
+                        "slug": "bucket-2",
+                        "question": "Bucket 2?",
+                        "category": "Politics",
+                        "active": True,
+                        "closed": False,
+                        "enableOrderBook": True,
+                        "groupItemTitle": "Bucket 2",
+                        "groupItemThreshold": "2",
+                        "outcomes": "[\"Yes\", \"No\"]",
+                        "clobTokenIds": "[\"yes-2\", \"no-2\"]",
+                    },
+                ],
+            }
+        )
+
+        self.assertIsNone(event)
 
     def test_best_level_uses_price_not_array_position(self) -> None:
         bid = _best_level(
@@ -157,6 +316,7 @@ class ScannerTests(unittest.TestCase):
             limit=25,
             offset=0,
             category=None,
+            include_neg_risk_baskets=False,
             poll_interval=5.0,
             max_iterations=2,
             snapshot_loader=loader,

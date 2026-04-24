@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Callable
 
 from .models import BinaryMarketSnapshot, RiskBuffer
-from .polymarket import load_live_snapshots
-from .scanner import scan_snapshots
+from .polymarket import load_live_neg_risk_events, load_live_snapshots
+from .scanner import rank_opportunities, scan_neg_risk_events, scan_snapshots
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,6 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=25, help="How many live markets to request.")
     parser.add_argument("--offset", type=int, default=0, help="Live-market pagination offset.")
     parser.add_argument("--category", help="Optional live-market category filter.")
+    parser.add_argument(
+        "--include-neg-risk-baskets",
+        action="store_true",
+        help="Also scan exhaustive negative-risk event baskets from the Polymarket events API.",
+    )
     parser.add_argument(
         "--poll-interval",
         type=float,
@@ -48,12 +53,14 @@ def format_decimal(value: Decimal) -> str:
 
 def format_opportunity(opportunity, *, rank: int | None = None) -> str:
     prefix = f"{rank}. " if rank is not None else ""
+    detail = f" {opportunity.detail}" if getattr(opportunity, "detail", None) else ""
     return (
         f"{prefix}{opportunity.market_id} {opportunity.side} "
         f"qty={opportunity.quantity} "
         f"gross={format_decimal(opportunity.gross_edge_per_share)} "
         f"net={format_decimal(opportunity.net_edge_per_share)} "
         f"pnl={format_decimal(opportunity.expected_pnl)}"
+        f"{detail}"
     )
 
 
@@ -102,9 +109,11 @@ def run_live_scan_loop(
     limit: int,
     offset: int,
     category: str | None,
+    include_neg_risk_baskets: bool,
     poll_interval: float,
     max_iterations: int | None = None,
     snapshot_loader: Callable[..., list[BinaryMarketSnapshot]] = load_live_snapshots,
+    neg_risk_loader: Callable[..., list] = load_live_neg_risk_events,
     output: Callable[[str], None] = print,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -114,10 +123,15 @@ def run_live_scan_loop(
         iteration += 1
         scanned_at = clock()
         try:
-            opportunities = scan_snapshots(
-                snapshot_loader(limit=limit, offset=offset, category=category),
-                risk=risk,
-            )
+            opportunities = scan_snapshots(snapshot_loader(limit=limit, offset=offset, category=category), risk=risk)
+            if include_neg_risk_baskets:
+                opportunities = rank_opportunities(
+                    opportunities
+                    + scan_neg_risk_events(
+                        neg_risk_loader(limit=limit, offset=offset, category=category),
+                        risk=risk,
+                    )
+                )
             emit_live_scan_results(opportunities, scan_number=iteration, scanned_at=scanned_at, output=output)
         except Exception as error:
             emit_live_scan_error(error, scan_number=iteration, scanned_at=scanned_at, output=output)
@@ -139,6 +153,8 @@ def main() -> int:
         parser.error("--max-iterations must be positive")
     if not args.polymarket_live and args.poll_interval > 0:
         parser.error("--poll-interval requires --polymarket-live")
+    if not args.polymarket_live and args.include_neg_risk_baskets:
+        parser.error("--include-neg-risk-baskets requires --polymarket-live")
     if args.max_iterations is not None and args.poll_interval <= 0:
         parser.error("--max-iterations requires a positive --poll-interval")
 
@@ -156,10 +172,24 @@ def main() -> int:
                 limit=args.limit,
                 offset=args.offset,
                 category=args.category,
+                include_neg_risk_baskets=args.include_neg_risk_baskets,
                 poll_interval=args.poll_interval,
                 max_iterations=args.max_iterations,
             )
-        snapshots = load_live_snapshots(limit=args.limit, offset=args.offset, category=args.category)
+        opportunities = scan_snapshots(
+            load_live_snapshots(limit=args.limit, offset=args.offset, category=args.category),
+            risk=risk,
+        )
+        if args.include_neg_risk_baskets:
+            opportunities = rank_opportunities(
+                opportunities
+                + scan_neg_risk_events(
+                    load_live_neg_risk_events(limit=args.limit, offset=args.offset, category=args.category),
+                    risk=risk,
+                )
+            )
+        print_opportunities(opportunities)
+        return 0
     else:
         payload = json.loads(args.input.read_text())
         snapshots = [BinaryMarketSnapshot.from_dict(item) for item in payload]

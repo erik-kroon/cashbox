@@ -55,6 +55,22 @@ class BinaryMarketSnapshot:
 
 
 @dataclass(frozen=True)
+class BasketLegSnapshot:
+    market_id: str
+    title: str
+    threshold: int
+    yes: TopOfBook
+
+
+@dataclass(frozen=True)
+class NegRiskEventSnapshot:
+    event_id: str
+    title: str
+    category: str
+    legs: tuple[BasketLegSnapshot, ...]
+
+
+@dataclass(frozen=True)
 class FeeSchedule:
     taker_fee_rate: Decimal
 
@@ -104,4 +120,4 @@ class Opportunity:
     gross_edge_per_share: Decimal
     net_edge_per_share: Decimal
     expected_pnl: Decimal
-
+    detail: str | None = None

@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Iterable
 
-from .models import BinaryMarketSnapshot, FeeSchedule, Opportunity, RiskBuffer
+from .models import BinaryMarketSnapshot, FeeSchedule, NegRiskEventSnapshot, Opportunity, RiskBuffer
 
 
 def _buy_full_set(snapshot: BinaryMarketSnapshot, fees: FeeSchedule, risk: RiskBuffer) -> Opportunity | None:
@@ -54,6 +54,35 @@ def _sell_full_set(snapshot: BinaryMarketSnapshot, fees: FeeSchedule, risk: Risk
     )
 
 
+def _buy_neg_risk_basket(
+    snapshot: NegRiskEventSnapshot,
+    fees: FeeSchedule,
+    risk: RiskBuffer,
+) -> Opportunity | None:
+    if not snapshot.legs:
+        return None
+
+    quantity = min(leg.yes.ask_size for leg in snapshot.legs)
+    if quantity <= 0:
+        return None
+
+    gross_edge = Decimal("1") - sum((leg.yes.ask for leg in snapshot.legs), start=Decimal("0"))
+    fee_total = sum((fees.taker_fee(shares=quantity, price=leg.yes.ask) for leg in snapshot.legs), start=Decimal("0"))
+    net_edge = gross_edge - (fee_total / quantity) - risk.total
+    if net_edge <= 0:
+        return None
+
+    return Opportunity(
+        market_id=snapshot.event_id,
+        side="buy_neg_risk_basket",
+        quantity=quantity,
+        gross_edge_per_share=gross_edge,
+        net_edge_per_share=net_edge,
+        expected_pnl=net_edge * quantity,
+        detail=f"legs={len(snapshot.legs)}",
+    )
+
+
 def scan_market(
     snapshot: BinaryMarketSnapshot,
     *,
@@ -70,6 +99,21 @@ def scan_market(
             opportunities.append(opportunity)
 
     return opportunities
+
+
+def scan_neg_risk_event(
+    snapshot: NegRiskEventSnapshot,
+    *,
+    fees: FeeSchedule | None = None,
+    risk: RiskBuffer | None = None,
+) -> list[Opportunity]:
+    fee_schedule = fees or FeeSchedule.for_category(snapshot.category)
+    risk_buffer = risk or RiskBuffer()
+
+    opportunity = _buy_neg_risk_basket(snapshot, fee_schedule, risk_buffer)
+    if opportunity is None:
+        return []
+    return [opportunity]
 
 
 def rank_opportunities(opportunities: Iterable[Opportunity]) -> list[Opportunity]:
@@ -94,4 +138,16 @@ def scan_snapshots(
     opportunities: list[Opportunity] = []
     for snapshot in snapshots:
         opportunities.extend(scan_market(snapshot, fees=fees, risk=risk))
+    return rank_opportunities(opportunities)
+
+
+def scan_neg_risk_events(
+    snapshots: Iterable[NegRiskEventSnapshot],
+    *,
+    fees: FeeSchedule | None = None,
+    risk: RiskBuffer | None = None,
+) -> list[Opportunity]:
+    opportunities: list[Opportunity] = []
+    for snapshot in snapshots:
+        opportunities.extend(scan_neg_risk_event(snapshot, fees=fees, risk=risk))
     return rank_opportunities(opportunities)
