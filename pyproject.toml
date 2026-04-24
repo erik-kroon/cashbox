@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cashbox"
 version = "0.1.0"
-description = "Fee-aware binary prediction market arb scanner"
+description = "Prediction-market ingest and research read path"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]
-cashbox-scan = "cashbox.cli:main"
+cashbox = "cashbox.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

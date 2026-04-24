@@ -1,192 +1,138 @@
 # Cashbox
 
-Cashbox is a small, deterministic scanner for prediction-market constraint arbitrage.
+Cashbox is a governed prediction-market research and execution platform.
 
-The first slice is intentionally narrow:
+The goal is not to let an LLM trade directly. The goal is to let an LLM generate, inspect, and manage research workflows while deterministic infrastructure preserves data integrity, validates strategy quality, enforces risk policy, and keeps signing and live execution outside the research trust boundary.
 
-- no execution engine
-- no forecasting model
-- no live market making or order routing
+Core principle:
 
-It currently answers two read-only questions:
+```text
+Agent proposes.
+Data records.
+Backtester verifies.
+Evaluator promotes.
+Paper trading confirms.
+Risk gateway constrains.
+Signer executes only approved orders.
+Human governs capital.
+```
 
-> Given public top-of-book quotes, do the hard constraints still leave positive expected value after fees and operational buffers?
+## What Cashbox Is Becoming
 
-And one model-driven question for offline snapshots:
+Cashbox is intended to be a production-grade operating system for autonomous prediction-market research with a controlled live-trading boundary.
 
-> Given a fair probability estimate, do passive YES/NO maker quotes still have positive EV after rebates and maker-specific risk buffers?
+Target capabilities:
 
-## What It Scans
+- continuous ingest of market metadata, books, trades, wallet activity, and resolution data
+- immutable raw and normalized datasets with point-in-time reproducibility
+- strategy research workflows driven by an LLM through a constrained tool API
+- deterministic backtesting with fees, slippage, latency, stale-book rejection, and partial fills
+- paper trading and drift analysis before any live capital is touched
+- risk-gated trade intents, isolated signing, and auditable execution
+- full observability for data health, research decisions, promotions, and live actions
 
-For each binary market:
+Cashbox is explicitly not:
 
-- `buy_full_set`: buy YES and NO if `yes_ask + no_ask < 1.00` after fees and buffers
-- `sell_full_set`: sell YES and NO if `yes_bid + no_bid > 1.00` after fees and buffers
+- an unconstrained trading bot
+- a prompt connected directly to exchange credentials
+- a system where backtests or model reasoning are treated as proof
+- a path for an agent to bypass policy, risk, or human capital governance
 
-For live Polymarket negative-risk events:
+## Architecture
 
-- `buy_neg_risk_basket`: buy every YES outcome when the event is an exhaustive threshold-ordered basket and `sum(yes_ask) < 1.00` after fees and buffers
+Cashbox is designed around separate trust zones:
 
-The scanner models:
+- `research`: LLM-driven hypothesis generation, report writing, and experiment orchestration
+- `data`: append-first ingestion, normalized market data, features, and quality monitoring
+- `research compute`: deterministic backtests, walk-forward runs, and simulation workloads
+- `execution`: risk gateway, paper execution, live order state, and reconciliation
+- `signer`: isolated signing service with no direct agent access
 
-- category-specific taker fee rates
-- optional maker rebate rates
-- fee formula `shares * fee_rate * price * (1 - price)`
-- per-trade slippage buffer
-- precision buffer
-- safety margin
-- available size from top-of-book liquidity
+At the product boundary, Hermes or another research agent interacts with Cashbox through a capability-gated tool API. The agent can read sanctioned datasets, create experiments, run approved research jobs, and request live-adjacent actions such as trade intents. It cannot submit orders directly, read secrets, edit risk policy, or access execution hosts.
 
-For maker quote evaluation it additionally models:
+## System Shape
 
-- optional `fair_yes` probability inputs on snapshots
-- passive quote EV on YES and NO bid/ask joins
-- per-share adverse selection, inventory, and operational buffers
-- configurable maker quote size
+Planned production components:
 
-## Install
+- `market-data-ingestor`: preserves raw payloads and emits normalized market events
+- `market-catalog`: maintains canonical market metadata and relation mappings
+- `feature-builder`: computes point-in-time feature datasets
+- `experiment-service`: stores immutable hypotheses, configs, and run lineage
+- `backtest-runner`: executes reproducible simulations
+- `walk-forward-runner`: validates robustness across regimes
+- `evaluator`: promotes or rejects strategies deterministically
+- `paper-executor`: measures live behavior without capital risk
+- `risk-gateway`: enforces live-trading policy and invariants
+- `signer-service`: signs only approved payloads
+- `live-executor`: interfaces with the exchange adapter
+- `governance-service`: handles approvals, RBAC, and audit review
+
+## Current Status
+
+This repository is early and currently implements only the first vertical slice:
+
+- append-first ingest of Polymarket Gamma market payloads
+- immutable dataset manifests and normalized market snapshots
+- append-only per-market history for point-in-time reads
+- research read APIs for active markets, metadata, timeseries, and ingest health
+
+That slice exists to support the first two derived user outcomes:
+
+- a researcher can discover active markets and inspect sanitized, reproducible market data
+- an operator can answer basic data-health and read-path questions from stored artifacts
+
+Everything beyond that remains planned work.
+
+## Local Usage
+
+Create a virtualenv and install the package:
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-pip install .
+pip install -e .
 ```
 
-## Input Format
-
-Pass the CLI a JSON file containing a list of market snapshots:
-
-```json
-[
-  {
-    "market_id": "btc-above-100k-today",
-    "category": "crypto",
-    "fair_yes": "0.62",
-    "yes": {
-      "bid": "0.53",
-      "ask": "0.56",
-      "bid_size": "125",
-      "ask_size": "75"
-    },
-    "no": {
-      "bid": "0.45",
-      "ask": "0.48",
-      "bid_size": "130",
-      "ask_size": "80"
-    }
-  }
-]
-```
-
-## Usage
+Ingest a local file of Polymarket-style market payloads:
 
 ```bash
-cashbox-scan examples/markets.json \
-  --slippage 0.002 \
-  --precision-buffer 0.001 \
-  --safety-margin 0.003 \
-  --min-edge 0.0
+cashbox ingest-file examples/gamma-markets.json
 ```
 
-Example output:
-
-```text
-btc-above-100k-today buy_full_set qty=75 gross=0.070000 net=0.034986 pnl=2.623980
-```
-
-Model-driven passive quote evaluation from a JSON snapshot file:
+Fetch directly from Polymarket Gamma and persist a dataset:
 
 ```bash
-cashbox-scan examples/markets.json \
-  --include-maker-quotes \
-  --maker-quantity 25 \
-  --maker-rebate-rate 0.01 \
-  --adverse-selection 0.008 \
-  --inventory-penalty 0.003 \
-  --operational-buffer 0.002 \
-  --maker-min-edge 0.001
+cashbox ingest-polymarket --limit 100 --active true
 ```
 
-Example maker output:
-
-```text
-btc-above-100k-today make_yes_bid qty=25 gross=0.050000 net=0.038491 pnl=0.962275 quote=0.53 fair=0.58
-```
-
-Live scan against Polymarket public APIs:
+Read the research-facing market data:
 
 ```bash
-cashbox-scan \
-  --polymarket-live \
-  --limit 25 \
-  --slippage 0.002 \
-  --precision-buffer 0.001 \
-  --safety-margin 0.003
+cashbox list-active-markets --category politics
+cashbox get-market-metadata election-2028
+cashbox get-market-timeseries election-2028 --field question --field volume
+cashbox get-ingest-health --stale-after-seconds 1800
 ```
 
-This uses:
+By default, local data is stored under `.cashbox/market-data/`.
 
-- `https://gamma-api.polymarket.com/markets` for live market discovery
-- `https://clob.polymarket.com/book` for public order book snapshots
+## Repository Layout
 
-The loader handles a real API quirk: the CLOB `bids` and `asks` arrays are not guaranteed to arrive best-first, so Cashbox derives top-of-book by price rather than list position.
+- `docs/prd.md`: target product and architecture definition
+- `src/cashbox/ingest.py`: raw and normalized market ingest
+- `src/cashbox/research.py`: deterministic research read path
+- `src/cashbox/models.py`: normalized market and dataset models
+- `src/cashbox/cli.py`: local ingest and read CLI
+- `tests/test_market_data.py`: first-slice coverage
 
-AFK loop mode keeps polling and prints each scan as a ranked opportunity list:
+## Near-Term Roadmap
 
-```bash
-cashbox-scan \
-  --polymarket-live \
-  --limit 25 \
-  --poll-interval 5 \
-  --slippage 0.002 \
-  --precision-buffer 0.001 \
-  --safety-margin 0.003
-```
+The next slices after this one are:
 
-Example live-loop output:
+1. agent gateway for read-only market tools
+2. experiment registry with immutable configs
+3. deterministic backtest execution
+4. evaluator and paper-promotion gates
+5. paper trading, drift reporting, and execution controls
 
-```text
-scan=12 at=2026-04-24T10:15:00Z opportunities=2
-1. btc-above-100k-today buy_full_set qty=75 gross=0.070000 net=0.028986 pnl=2.173980
-2. fed-cut-in-june sell_full_set qty=40 gross=0.022000 net=0.006100 pnl=0.244000
-```
-
-Live polling is resilient to transient per-market fetch failures and ranks opportunities globally by expected PnL before printing them.
-
-Opt in to exhaustive negative-risk basket scans:
-
-```bash
-cashbox-scan \
-  --polymarket-live \
-  --include-neg-risk-baskets \
-  --limit 25 \
-  --slippage 0.002 \
-  --precision-buffer 0.001 \
-  --safety-margin 0.003
-```
-
-The basket path is intentionally conservative:
-
-- live-only for now
-- restricted to `negRisk=true` events from `https://gamma-api.polymarket.com/events`
-- only accepts binary submarkets whose `groupItemThreshold` values form a contiguous `0..N-1` exhaustive ladder
-- buys YES baskets only; it does not try to model conversion or execution risk yet
-
-The maker path is also intentionally conservative:
-
-- file-input only for now
-- requires a `fair_yes` value per snapshot
-- evaluates joining the current best YES/NO bid or ask only
-- does not model queue position, fill probability, or post-only order management yet
-
-## Repo Layout
-
-- `src/cashbox/models.py`: domain models and fee schedules
-- `src/cashbox/scanner.py`: fee-aware full-set and neg-risk basket arb logic
-- `src/cashbox/cli.py`: JSON-driven command-line entrypoint
-- `src/cashbox/polymarket.py`: public Polymarket market, event, and order book ingestion
-- `tests/test_scanner.py`: stdlib `unittest` coverage for fee math and edge detection
-
-## Next Steps
-
-The next serious step is execution realism: queue-position modeling for maker quotes, partial-fill simulation for two-leg arb, and eventually a tiny-size paper executor before any live trading path is added.
+The repository should keep moving in that order so the research path grows before any live order path exists.
