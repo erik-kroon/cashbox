@@ -5,6 +5,12 @@ from datetime import timedelta
 import json
 from pathlib import Path
 
+from .experiments import (
+    EXPERIMENT_STATUSES,
+    ExperimentFilter,
+    ExperimentServiceError,
+    build_experiment_service,
+)
 from .gateway import AgentGatewayError, build_agent_gateway
 from .ingest import FileSystemMarketStore, ingest_polymarket_markets
 from .models import MarketFilter, parse_datetime
@@ -49,6 +55,58 @@ def build_parser() -> argparse.ArgumentParser:
     health.add_argument("--dataset-id")
     health.add_argument("--stale-after-seconds", type=int, default=3600)
 
+    families = subparsers.add_parser("list-strategy-families", help="List supported experiment strategy families.")
+
+    template = subparsers.add_parser("get-strategy-template", help="Read the schema template for a strategy family.")
+    template.add_argument("strategy_family")
+
+    validate = subparsers.add_parser("validate-strategy-config", help="Validate a strategy config payload.")
+    validate.add_argument("strategy_family")
+    validate.add_argument("--config-json", required=True)
+
+    create_experiment = subparsers.add_parser(
+        "create-experiment",
+        help="Create an immutable experiment definition with an initial DRAFT lifecycle event.",
+    )
+    create_experiment.add_argument("--hypothesis", required=True)
+    create_experiment.add_argument("--strategy-family", required=True)
+    create_experiment.add_argument("--config-json", required=True)
+    create_experiment.add_argument("--dataset-id", required=True)
+    create_experiment.add_argument("--code-version", required=True)
+    create_experiment.add_argument("--generated-by", required=True)
+
+    clone_experiment = subparsers.add_parser(
+        "clone-experiment",
+        help="Clone an experiment into a new immutable definition with optional modifications.",
+    )
+    clone_experiment.add_argument("experiment_id")
+    clone_experiment.add_argument("--modifications-json", default="{}")
+    clone_experiment.add_argument("--generated-by", required=True)
+
+    note = subparsers.add_parser("attach-research-note", help="Attach an append-only markdown note to an experiment.")
+    note.add_argument("experiment_id")
+    note.add_argument("--author", required=True)
+    note.add_argument("--markdown", required=True)
+
+    experiments = subparsers.add_parser("list-experiments", help="List experiments from the local registry.")
+    experiments.add_argument("--strategy-family")
+    experiments.add_argument("--status", choices=EXPERIMENT_STATUSES)
+    experiments.add_argument("--generated-by")
+    experiments.add_argument("--dataset-id")
+    experiments.add_argument("--limit", type=int)
+
+    experiment = subparsers.add_parser("get-experiment", help="Read an experiment definition and lifecycle history.")
+    experiment.add_argument("experiment_id")
+
+    transition = subparsers.add_parser(
+        "transition-experiment-status",
+        help="Append a status transition event for an experiment.",
+    )
+    transition.add_argument("experiment_id")
+    transition.add_argument("--status", required=True, choices=EXPERIMENT_STATUSES)
+    transition.add_argument("--changed-by", required=True)
+    transition.add_argument("--reason")
+
     credential = subparsers.add_parser(
         "issue-agent-credential",
         help="Issue a scoped credential for the read-only agent gateway.",
@@ -77,6 +135,7 @@ def main() -> int:
     store = FileSystemMarketStore(args.root)
     read_path = ResearchMarketReadPath(store)
     gateway = build_agent_gateway(args.root)
+    experiments = build_experiment_service(args.root)
 
     if args.command == "ingest-file":
         payload = json.loads(args.input.read_text())
@@ -134,6 +193,108 @@ def main() -> int:
             stale_after=timedelta(seconds=args.stale_after_seconds),
         )
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "list-strategy-families":
+        print(json.dumps(experiments.list_strategy_families(), indent=2))
+        return 0
+
+    if args.command == "get-strategy-template":
+        try:
+            result = experiments.get_strategy_template(args.strategy_family)
+        except ExperimentServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "validate-strategy-config":
+        try:
+            config = json.loads(args.config_json)
+            result = experiments.validate_strategy_config(args.strategy_family, config)
+        except json.JSONDecodeError as exc:
+            parser.error(f"invalid --config-json payload: {exc}")
+        except ExperimentServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "create-experiment":
+        try:
+            config = json.loads(args.config_json)
+            result = experiments.create_experiment(
+                hypothesis=args.hypothesis,
+                strategy_family=args.strategy_family,
+                config=config,
+                dataset_id=args.dataset_id,
+                code_version=args.code_version,
+                generated_by=args.generated_by,
+            )
+        except json.JSONDecodeError as exc:
+            parser.error(f"invalid --config-json payload: {exc}")
+        except ExperimentServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "clone-experiment":
+        try:
+            modifications = json.loads(args.modifications_json)
+            result = experiments.clone_experiment(
+                args.experiment_id,
+                modifications,
+                generated_by=args.generated_by,
+            )
+        except json.JSONDecodeError as exc:
+            parser.error(f"invalid --modifications-json payload: {exc}")
+        except ExperimentServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "attach-research-note":
+        try:
+            result = experiments.attach_research_note(
+                args.experiment_id,
+                author=args.author,
+                markdown=args.markdown,
+            )
+        except ExperimentServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "list-experiments":
+        result = experiments.list_experiments(
+            ExperimentFilter(
+                strategy_family=args.strategy_family,
+                status=args.status,
+                generated_by=args.generated_by,
+                dataset_id=args.dataset_id,
+                limit=args.limit,
+            )
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "get-experiment":
+        try:
+            result = experiments.get_experiment(args.experiment_id)
+        except ExperimentServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "transition-experiment-status":
+        try:
+            result = experiments.transition_experiment_status(
+                args.experiment_id,
+                to_status=args.status,
+                changed_by=args.changed_by,
+                reason=args.reason,
+            )
+        except ExperimentServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
         return 0
 
     if args.command == "issue-agent-credential":
