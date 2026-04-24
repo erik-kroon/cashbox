@@ -48,6 +48,17 @@ from .gateway import (
 )
 from .ingest import FileSystemMarketStore, ingest_polymarket_markets
 from .models import IngestHealthReport, MarketDatasetManifest, MarketFilter, NormalizedMarketRecord
+from .paper import (
+    PAPER_DRIFT_STATUSES,
+    PAPER_ENGINE_VERSION,
+    PAPER_RUN_STATUSES,
+    FileSystemPaperStore,
+    PaperNotFoundError,
+    PaperService,
+    PaperServiceError,
+    PaperValidationError,
+    build_paper_service,
+)
 from .research import ResearchMarketReadPath
 
 __all__ = [
@@ -55,6 +66,9 @@ __all__ = [
     "BACKTEST_SIMULATION_LEVELS",
     "EXPERIMENT_STATUSES",
     "EVALUATOR_POLICY_VERSION",
+    "PAPER_DRIFT_STATUSES",
+    "PAPER_ENGINE_VERSION",
+    "PAPER_RUN_STATUSES",
     "AgentAuthenticationError",
     "AgentAuthorizationError",
     "AgentExecutionError",
@@ -87,6 +101,10 @@ __all__ = [
     "MarketDatasetManifest",
     "MarketFilter",
     "NormalizedMarketRecord",
+    "PaperNotFoundError",
+    "PaperService",
+    "PaperServiceError",
+    "PaperValidationError",
     "PROMOTION_TARGET_STAGES",
     "READ_ONLY_TOOL_NAMES",
     "ResearchMarketReadPath",
@@ -95,5 +113,7 @@ __all__ = [
     "build_evaluator_service",
     "build_agent_gateway",
     "build_experiment_service",
+    "build_paper_service",
+    "FileSystemPaperStore",
     "ingest_polymarket_markets",
 ]
