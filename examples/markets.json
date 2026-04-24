@@ -1,0 +1,34 @@
+[
+  {
+    "market_id": "btc-above-100k-today",
+    "category": "crypto",
+    "yes": {
+      "bid": "0.53",
+      "ask": "0.54",
+      "bid_size": "125",
+      "ask_size": "75"
+    },
+    "no": {
+      "bid": "0.45",
+      "ask": "0.39",
+      "bid_size": "130",
+      "ask_size": "80"
+    }
+  },
+  {
+    "market_id": "fed-cuts-before-july",
+    "category": "politics",
+    "yes": {
+      "bid": "0.51",
+      "ask": "0.54",
+      "bid_size": "200",
+      "ask_size": "210"
+    },
+    "no": {
+      "bid": "0.48",
+      "ask": "0.51",
+      "bid_size": "160",
+      "ask_size": "150"
+    }
+  }
+]
