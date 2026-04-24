@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from .backtests import BacktestServiceError, build_backtest_service
+from .evaluator import EvaluationServiceError, PROMOTION_TARGET_STAGES, build_evaluator_service
 from .experiments import (
     EXPERIMENT_STATUSES,
     ExperimentFilter,
@@ -128,6 +129,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backtest_failure.add_argument("run_id")
 
+    score_experiment = subparsers.add_parser(
+        "score-experiment",
+        help="Compute and persist a deterministic evaluator score for a successful backtest.",
+    )
+    score_experiment.add_argument("experiment_id")
+    score_experiment.add_argument("--run-id")
+
+    promotion = subparsers.add_parser(
+        "check-promotion-eligibility",
+        help="Evaluate a promotion gate and optionally promote a strategy when the gate passes.",
+    )
+    promotion.add_argument("experiment_id")
+    promotion.add_argument("--target-stage", required=True, choices=PROMOTION_TARGET_STAGES)
+    promotion.add_argument("--run-id")
+    promotion.add_argument("--changed-by", default="evaluator")
+    promotion.add_argument("--promote-if-eligible", action="store_true")
+    promotion.add_argument("--min-out-of-sample-trades", type=int, default=250)
+    promotion.add_argument("--min-distinct-markets", type=int, default=25)
+    promotion.add_argument("--max-drawdown-limit-usd")
+
     credential = subparsers.add_parser(
         "issue-agent-credential",
         help="Issue a scoped credential for the read-only agent gateway.",
@@ -158,6 +179,7 @@ def main() -> int:
     gateway = build_agent_gateway(args.root)
     experiments = build_experiment_service(args.root)
     backtests = build_backtest_service(args.root)
+    evaluator = build_evaluator_service(args.root)
 
     if args.command == "ingest-file":
         payload = json.loads(args.input.read_text())
@@ -346,6 +368,34 @@ def main() -> int:
         try:
             result = backtests.explain_backtest_failure(args.run_id)
         except BacktestServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "score-experiment":
+        try:
+            result = evaluator.score_experiment(
+                args.experiment_id,
+                run_id=args.run_id,
+            )
+        except (BacktestServiceError, EvaluationServiceError, ExperimentServiceError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "check-promotion-eligibility":
+        try:
+            result = evaluator.check_promotion_eligibility(
+                args.experiment_id,
+                args.target_stage,
+                run_id=args.run_id,
+                changed_by=args.changed_by,
+                promote=args.promote_if_eligible,
+                min_out_of_sample_trades=args.min_out_of_sample_trades,
+                min_distinct_markets=args.min_distinct_markets,
+                max_drawdown_limit_usd=args.max_drawdown_limit_usd,
+            )
+        except (BacktestServiceError, EvaluationServiceError, ExperimentServiceError) as exc:
             parser.error(str(exc))
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
