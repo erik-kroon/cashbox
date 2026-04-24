@@ -69,13 +69,14 @@ Planned production components:
 
 ## Current Status
 
-This repository is early and currently implements only the first vertical slice:
+This repository is early and currently implements the first two local vertical slices:
 
 - append-first ingest of Polymarket Gamma market payloads
 - immutable dataset manifests and normalized market snapshots
 - append-only per-market history for point-in-time reads
 - research read APIs for active markets, metadata, timeseries, and ingest health
 - a local agent gateway for approved read-only market tools with audit logging
+- an experiment registry with immutable definitions, append-only lifecycle history, and research notes
 
 That slice exists to support the first two derived user outcomes:
 
@@ -84,11 +85,12 @@ That slice exists to support the first two derived user outcomes:
 
 Everything beyond that remains planned work.
 
-The repository now also includes the next slice in local form:
+The repository now also includes:
 
 - a scoped agent gateway that exposes only approved read-only market tools
 - credential issuance with per-tool authorization and fixed-window rate limits
 - input sanitization and append-only audit logs for each gateway call
+- a filesystem-backed experiment service for templates, validation, creation, cloning, and lifecycle tracking
 
 ## Local Usage
 
@@ -134,14 +136,34 @@ cashbox gateway-call list_active_markets \
 
 By default, local data is stored under `.cashbox/market-data/`.
 
+Create and inspect immutable experiments:
+
+```bash
+cashbox list-strategy-families
+cashbox get-strategy-template midpoint_reversion
+cashbox create-experiment \
+  --hypothesis "Mean reversion after thin overnight liquidity dislocations" \
+  --strategy-family midpoint_reversion \
+  --config-json '{"market_id":"btc-150k","lookback_minutes":30,"entry_zscore":2.1,"exit_zscore":0.7,"max_position_usd":250}' \
+  --dataset-id 20260424T100000Z-demo \
+  --code-version local-dev \
+  --generated-by hermes
+cashbox transition-experiment-status <experiment-id> --status VALIDATED_CONFIG --changed-by evaluator
+cashbox attach-research-note <experiment-id> --author hermes --markdown "Spread widened after CPI headlines."
+cashbox list-experiments --status VALIDATED_CONFIG
+cashbox get-experiment <experiment-id>
+```
+
 ## Repository Layout
 
 - `docs/prd.md`: target product and architecture definition
 - `src/cashbox/ingest.py`: raw and normalized market ingest
 - `src/cashbox/research.py`: deterministic research read path
+- `src/cashbox/experiments.py`: experiment registry, immutable configs, and lifecycle tracking
 - `src/cashbox/models.py`: normalized market and dataset models
 - `src/cashbox/cli.py`: local ingest and read CLI
 - `tests/test_market_data.py`: first-slice coverage
+- `tests/test_experiments.py`: experiment registry coverage
 
 ## Near-Term Roadmap
 
