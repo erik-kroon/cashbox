@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
-import json
 from pathlib import Path
 from typing import Any, Optional
 
 from .models import format_datetime, utc_now
+from .persistence import append_jsonl, canonical_copy, canonical_json, read_json, read_jsonl, write_json
 
 EXPERIMENT_STATUSES = (
     "DRAFT",
@@ -27,6 +27,9 @@ EXPERIMENT_STATUSES = (
     "RETIRED",
 )
 TERMINAL_EXPERIMENT_STATUSES = ("DISABLED", "REJECTED", "RETIRED")
+BACKTEST_READY_EXPERIMENT_STATUSES = ("VALIDATED_CONFIG", "BACKTEST_QUEUED", "BACKTESTED")
+PAPER_RUN_READY_EXPERIMENT_STATUSES = ("PAPER_ELIGIBLE", "PAPER_RUNNING", "PAPER_PASSED")
+LIVE_TRADING_PERMITTED_EXPERIMENT_STATUSES = ("TINY_LIVE_ELIGIBLE", "TINY_LIVE_RUNNING", "PRODUCTION_APPROVED")
 
 STRATEGY_TEMPLATES: dict[str, dict[str, Any]] = {
     "cross_market_arbitrage": {
@@ -64,43 +67,6 @@ STRATEGY_TEMPLATES: dict[str, dict[str, Any]] = {
     },
 }
 
-
-def _canonical_json(payload: Any) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-
-def _canonical_copy(payload: Any) -> Any:
-    return json.loads(_canonical_json(payload))
-
-
-def _json_dump(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, indent=2, sort_keys=True))
-        handle.write("\n")
-
-
-def _json_load(path: Path) -> Any:
-    return json.loads(path.read_text())
-
-
-def _jsonl_append(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True))
-        handle.write("\n")
-
-
-def _jsonl_load(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            rows.append(json.loads(line))
-    return rows
-
-
 def _require_text(name: str, value: str, *, max_length: int = 2000) -> str:
     normalized = str(value).strip()
     if not normalized:
@@ -137,12 +103,12 @@ def _validate_field(field_name: str, value: Any, spec: dict[str, Any]) -> None:
 
 
 def _merge_dicts(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
-    merged = _canonical_copy(base)
+    merged = canonical_copy(base)
     for key, value in updates.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _merge_dicts(merged[key], value)
         else:
-            merged[key] = _canonical_copy(value)
+            merged[key] = canonical_copy(value)
     return merged
 
 
@@ -190,7 +156,7 @@ class ExperimentDefinition:
             "experiment_id": self.experiment_id,
             "hypothesis": self.hypothesis,
             "strategy_family": self.strategy_family,
-            "config": _canonical_copy(self.config),
+            "config": canonical_copy(self.config),
             "config_sha256": self.config_sha256,
             "config_schema_version": self.config_schema_version,
             "dataset_id": self.dataset_id,
@@ -206,7 +172,7 @@ class ExperimentDefinition:
             experiment_id=str(payload["experiment_id"]),
             hypothesis=str(payload["hypothesis"]),
             strategy_family=str(payload["strategy_family"]),
-            config=_canonical_copy(payload["config"]),
+            config=canonical_copy(payload["config"]),
             config_sha256=str(payload["config_sha256"]),
             config_schema_version=int(payload["config_schema_version"]),
             dataset_id=str(payload["dataset_id"]),
@@ -327,7 +293,7 @@ class ExperimentService:
             "strategy_family": family,
             "description": template["description"],
             "config_schema_version": template["config_schema_version"],
-            "fields": _canonical_copy(template["fields"]),
+            "fields": canonical_copy(template["fields"]),
         }
 
     def validate_strategy_config(self, strategy_family: str, config: dict[str, Any]) -> dict[str, Any]:
@@ -340,7 +306,7 @@ class ExperimentService:
             raise ExperimentValidationError(f"unknown strategy_family: {family}")
 
         try:
-            normalized_config = _canonical_copy(config)
+            normalized_config = canonical_copy(config)
         except TypeError as exc:
             raise ExperimentValidationError(f"config must be JSON serializable: {exc}") from exc
 
@@ -386,7 +352,7 @@ class ExperimentService:
         timestamp = now or utc_now()
         created_at = format_datetime(timestamp) or ""
         config_payload = validation["normalized_config"]
-        config_sha256 = hashlib.sha256(_canonical_json(config_payload).encode("utf-8")).hexdigest()
+        config_sha256 = hashlib.sha256(canonical_json(config_payload).encode("utf-8")).hexdigest()
         experiment_id = self._build_experiment_id(
             timestamp=timestamp,
             hypothesis=hypothesis_text,
@@ -406,7 +372,7 @@ class ExperimentService:
             parent_experiment_id=parent_experiment_id,
             created_at=created_at,
         )
-        _json_dump(self.store.definition_path(experiment_id), definition.to_dict())
+        write_json(self.store.definition_path(experiment_id), definition.to_dict(), if_exists="error")
         self._append_status_event(
             ExperimentStatusEvent(
                 experiment_id=experiment_id,
@@ -463,8 +429,201 @@ class ExperimentService:
             markdown=_require_text("markdown", markdown, max_length=20000),
             created_at=created_at,
         )
-        _jsonl_append(self.store.notes_path(definition.experiment_id), note.to_dict())
+        append_jsonl(self.store.notes_path(definition.experiment_id), note.to_dict())
         return note.to_dict()
+
+    def get_progression_state(self, experiment_id: str) -> dict[str, Any]:
+        definition = self._load_definition(experiment_id)
+        return self._progression_state_payload(definition.experiment_id)
+
+    def record_backtest_completed(
+        self,
+        experiment_id: str,
+        *,
+        changed_by: str,
+        reason: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> dict[str, Any]:
+        definition = self._load_definition(experiment_id)
+        state = self._progression_state_payload(definition.experiment_id)
+        current_status = state["current_status"]
+        status_events: list[dict[str, Any]] = []
+
+        if current_status == "VALIDATED_CONFIG":
+            queued_event = self._transition_status(
+                definition,
+                target_status="BACKTEST_QUEUED",
+                changed_by=changed_by,
+                reason=reason,
+                now=now,
+            )
+            status_events.append(queued_event.to_dict())
+            current_status = queued_event.to_status
+
+        if current_status == "BACKTEST_QUEUED":
+            completed_event = self._transition_status(
+                definition,
+                target_status="BACKTESTED",
+                changed_by=changed_by,
+                reason=reason,
+                now=now,
+            )
+            status_events.append(completed_event.to_dict())
+            return {
+                "experiment_id": definition.experiment_id,
+                "operation": "backtest_completed",
+                "previous_status": state["current_status"],
+                "resulting_status": completed_event.to_status,
+                "applied": True,
+                "blockers": [],
+                "status_events": status_events,
+            }
+
+        if current_status == "BACKTESTED":
+            return {
+                "experiment_id": definition.experiment_id,
+                "operation": "backtest_completed",
+                "previous_status": state["current_status"],
+                "resulting_status": current_status,
+                "applied": False,
+                "blockers": [],
+                "status_events": status_events,
+            }
+
+        raise ExperimentLifecycleError(f"experiment is not backtest-ready; got {state['current_status']}")
+
+    def promote_to_paper_eligible(
+        self,
+        experiment_id: str,
+        *,
+        changed_by: str,
+        reason: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> dict[str, Any]:
+        definition = self._load_definition(experiment_id)
+        state = self._progression_state_payload(definition.experiment_id)
+        current_status = state["current_status"]
+        if current_status == "WALK_FORWARD_TESTED":
+            event = self._transition_status(
+                definition,
+                target_status="PAPER_ELIGIBLE",
+                changed_by=changed_by,
+                reason=reason,
+                now=now,
+            )
+            return {
+                "experiment_id": definition.experiment_id,
+                "operation": "paper_eligibility_promoted",
+                "previous_status": current_status,
+                "resulting_status": event.to_status,
+                "applied": True,
+                "blockers": [],
+                "status_events": [event.to_dict()],
+            }
+
+        blockers = (
+            ["experiment already in PAPER_ELIGIBLE"]
+            if current_status == "PAPER_ELIGIBLE"
+            else ["experiment must be WALK_FORWARD_TESTED before promotion to PAPER_ELIGIBLE"]
+        )
+        return {
+            "experiment_id": definition.experiment_id,
+            "operation": "paper_eligibility_promoted",
+            "previous_status": current_status,
+            "resulting_status": current_status,
+            "applied": False,
+            "blockers": blockers,
+            "status_events": [],
+        }
+
+    def record_paper_run_started(
+        self,
+        experiment_id: str,
+        *,
+        changed_by: str,
+        reason: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> dict[str, Any]:
+        definition = self._load_definition(experiment_id)
+        state = self._progression_state_payload(definition.experiment_id)
+        current_status = state["current_status"]
+        if current_status == "PAPER_ELIGIBLE":
+            event = self._transition_status(
+                definition,
+                target_status="PAPER_RUNNING",
+                changed_by=changed_by,
+                reason=reason,
+                now=now,
+            )
+            return {
+                "experiment_id": definition.experiment_id,
+                "operation": "paper_run_started",
+                "previous_status": current_status,
+                "resulting_status": event.to_status,
+                "applied": True,
+                "blockers": [],
+                "status_events": [event.to_dict()],
+            }
+
+        if current_status in {"PAPER_RUNNING", "PAPER_PASSED"}:
+            return {
+                "experiment_id": definition.experiment_id,
+                "operation": "paper_run_started",
+                "previous_status": current_status,
+                "resulting_status": current_status,
+                "applied": False,
+                "blockers": [],
+                "status_events": [],
+            }
+
+        raise ExperimentLifecycleError(f"experiment is not paper-run ready; got {current_status}")
+
+    def record_paper_run_accepted(
+        self,
+        experiment_id: str,
+        *,
+        changed_by: str,
+        reason: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> dict[str, Any]:
+        definition = self._load_definition(experiment_id)
+        state = self._progression_state_payload(definition.experiment_id)
+        current_status = state["current_status"]
+        if current_status == "PAPER_RUNNING":
+            event = self._transition_status(
+                definition,
+                target_status="PAPER_PASSED",
+                changed_by=changed_by,
+                reason=reason,
+                now=now,
+            )
+            return {
+                "experiment_id": definition.experiment_id,
+                "operation": "paper_run_accepted",
+                "previous_status": current_status,
+                "resulting_status": event.to_status,
+                "applied": True,
+                "blockers": [],
+                "status_events": [event.to_dict()],
+            }
+
+        blockers = (
+            ["experiment already in PAPER_PASSED"]
+            if current_status == "PAPER_PASSED"
+            else ["experiment must be PAPER_RUNNING before paper completion promotion"]
+        )
+        return {
+            "experiment_id": definition.experiment_id,
+            "operation": "paper_run_accepted",
+            "previous_status": current_status,
+            "resulting_status": current_status,
+            "applied": False,
+            "blockers": blockers,
+            "status_events": [],
+        }
+
+    def permits_live_trading(self, experiment_id: str) -> bool:
+        return bool(self.get_progression_state(experiment_id)["permits_live_trading"])
 
     def transition_experiment_status(
         self,
@@ -476,25 +635,13 @@ class ExperimentService:
         now: Optional[datetime] = None,
     ) -> dict[str, Any]:
         definition = self._load_definition(experiment_id)
-        target_status = _require_text("status", to_status, max_length=120)
-        actor = _require_text("changed_by", changed_by, max_length=200)
-        cleaned_reason = None if reason is None else _require_text("reason", reason, max_length=2000)
-        if target_status not in EXPERIMENT_STATUSES:
-            raise ExperimentLifecycleError(f"unknown experiment status: {target_status}")
-
-        history = self._load_status_history(definition.experiment_id)
-        current_status = history[-1].to_status if history else None
-        self._validate_transition(current_status, target_status)
-
-        event = ExperimentStatusEvent(
-            experiment_id=definition.experiment_id,
-            from_status=current_status,
-            to_status=target_status,
-            changed_by=actor,
-            changed_at=format_datetime(now or utc_now()) or "",
-            reason=cleaned_reason,
+        event = self._transition_status(
+            definition,
+            target_status=to_status,
+            changed_by=changed_by,
+            reason=reason,
+            now=now,
         )
-        self._append_status_event(event)
         return event.to_dict()
 
     def list_experiments(self, filters: Optional[ExperimentFilter] = None) -> list[dict[str, Any]]:
@@ -508,7 +655,7 @@ class ExperimentService:
 
         summaries: list[dict[str, Any]] = []
         for path in sorted(self.store.definitions_dir.glob("*.json")):
-            definition = ExperimentDefinition.from_dict(_json_load(path))
+            definition = ExperimentDefinition.from_dict(read_json(path))
             current_status = self._current_status(definition.experiment_id)
             if requested_status and current_status != requested_status:
                 continue
@@ -518,7 +665,7 @@ class ExperimentService:
                 continue
             if requested_dataset and definition.dataset_id != requested_dataset:
                 continue
-            notes_count = len(_jsonl_load(self.store.notes_path(definition.experiment_id)))
+            notes_count = len(read_jsonl(self.store.notes_path(definition.experiment_id)))
             summaries.append(
                 {
                     "experiment_id": definition.experiment_id,
@@ -543,7 +690,7 @@ class ExperimentService:
     def get_experiment(self, experiment_id: str) -> dict[str, Any]:
         definition = self._load_definition(experiment_id)
         status_history = [event.to_dict() for event in self._load_status_history(experiment_id)]
-        notes = [ExperimentResearchNote.from_dict(row).to_dict() for row in _jsonl_load(self.store.notes_path(experiment_id))]
+        notes = [ExperimentResearchNote.from_dict(row).to_dict() for row in read_jsonl(self.store.notes_path(experiment_id))]
         payload = definition.to_dict()
         payload["current_status"] = status_history[-1]["to_status"] if status_history else None
         payload["status_history"] = status_history
@@ -551,16 +698,57 @@ class ExperimentService:
         return payload
 
     def _append_status_event(self, event: ExperimentStatusEvent) -> None:
-        _jsonl_append(self.store.status_path(event.experiment_id), event.to_dict())
+        append_jsonl(self.store.status_path(event.experiment_id), event.to_dict())
+
+    def _progression_state_payload(self, experiment_id: str) -> dict[str, Any]:
+        current_status = self._current_status(experiment_id)
+        return {
+            "experiment_id": experiment_id,
+            "current_status": current_status,
+            "is_terminal": current_status in TERMINAL_EXPERIMENT_STATUSES,
+            "permits_backtest": current_status in BACKTEST_READY_EXPERIMENT_STATUSES,
+            "permits_paper_run": current_status in PAPER_RUN_READY_EXPERIMENT_STATUSES,
+            "permits_live_trading": current_status in LIVE_TRADING_PERMITTED_EXPERIMENT_STATUSES,
+        }
 
     def _load_definition(self, experiment_id: str) -> ExperimentDefinition:
         path = self.store.definition_path(experiment_id)
         if not path.exists():
             raise ExperimentNotFoundError(f"unknown experiment_id: {experiment_id}")
-        return ExperimentDefinition.from_dict(_json_load(path))
+        return ExperimentDefinition.from_dict(read_json(path))
+
+    def _transition_status(
+        self,
+        definition: ExperimentDefinition,
+        *,
+        target_status: str,
+        changed_by: str,
+        reason: Optional[str],
+        now: Optional[datetime],
+    ) -> ExperimentStatusEvent:
+        normalized_target_status = _require_text("status", target_status, max_length=120)
+        actor = _require_text("changed_by", changed_by, max_length=200)
+        cleaned_reason = None if reason is None else _require_text("reason", reason, max_length=2000)
+        if normalized_target_status not in EXPERIMENT_STATUSES:
+            raise ExperimentLifecycleError(f"unknown experiment status: {normalized_target_status}")
+
+        history = self._load_status_history(definition.experiment_id)
+        current_status = history[-1].to_status if history else None
+        self._validate_transition(current_status, normalized_target_status)
+
+        event = ExperimentStatusEvent(
+            experiment_id=definition.experiment_id,
+            from_status=current_status,
+            to_status=normalized_target_status,
+            changed_by=actor,
+            changed_at=format_datetime(now or utc_now()) or "",
+            reason=cleaned_reason,
+        )
+        self._append_status_event(event)
+        return event
 
     def _load_status_history(self, experiment_id: str) -> list[ExperimentStatusEvent]:
-        return [ExperimentStatusEvent.from_dict(row) for row in _jsonl_load(self.store.status_path(experiment_id))]
+        return [ExperimentStatusEvent.from_dict(row) for row in read_jsonl(self.store.status_path(experiment_id))]
 
     def _current_status(self, experiment_id: str) -> Optional[str]:
         history = self._load_status_history(experiment_id)

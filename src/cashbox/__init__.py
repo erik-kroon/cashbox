@@ -60,6 +60,7 @@ from .paper import (
     build_paper_service,
 )
 from .research import ResearchMarketReadPath
+from .runtime import CashboxWorkspace, build_workspace
 from .risk import (
     HUMAN_REVIEW_DECISIONS,
     LIVE_TRADING_EXPERIMENT_STATUSES,
@@ -73,6 +74,7 @@ from .risk import (
     RiskValidationError,
     build_risk_gateway_service,
 )
+from .strategy_replay import HistoryPoint, StrategyReplayService
 
 __all__ = [
     "BACKTEST_RUN_STATUSES",
@@ -95,6 +97,7 @@ __all__ = [
     "BacktestService",
     "BacktestServiceError",
     "BacktestValidationError",
+    "CashboxWorkspace",
     "EvaluationService",
     "EvaluationServiceError",
     "EvaluationValidationError",
@@ -112,6 +115,7 @@ __all__ = [
     "FileSystemBacktestStore",
     "FileSystemEvaluationStore",
     "FileSystemExperimentStore",
+    "HistoryPoint",
     "IngestHealthReport",
     "MarketDatasetManifest",
     "MarketFilter",
@@ -129,6 +133,7 @@ __all__ = [
     "RiskServiceError",
     "RiskValidationError",
     "STRATEGY_TEMPLATES",
+    "StrategyReplayService",
     "FileSystemRiskStore",
     "HUMAN_REVIEW_DECISIONS",
     "LIVE_TRADING_EXPERIMENT_STATUSES",
@@ -138,6 +143,7 @@ __all__ = [
     "build_experiment_service",
     "build_paper_service",
     "build_risk_gateway_service",
+    "build_workspace",
     "FileSystemPaperStore",
     "ingest_polymarket_markets",
 ]

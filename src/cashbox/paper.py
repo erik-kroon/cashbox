@@ -4,32 +4,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 import hashlib
-import json
 from pathlib import Path
 from typing import Any, Optional
 
-from .backtests import BacktestNotFoundError, BacktestService, HistoryPoint, build_backtest_service
-from .experiments import ExperimentService, build_experiment_service
+from .backtests import BacktestNotFoundError, BacktestService
+from .experiments import ExperimentService
 from .ingest import FileSystemMarketStore
-from .models import NormalizedMarketRecord, format_datetime, parse_datetime, utc_now
+from .models import format_datetime, parse_datetime, utc_now
+from .persistence import canonical_json, read_json, write_json
+from .strategy_replay import HistoryPoint, StrategyReplayService
 
 PAPER_RUN_STATUSES = ("RUNNING", "STOPPED")
 PAPER_DRIFT_STATUSES = ("ACCEPTABLE", "DRIFTED")
 PAPER_ENGINE_VERSION = 1
-
-
-def _canonical_json(payload: Any) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-
-def _json_dump(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _json_load(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
-
 
 def _require_text(name: str, value: Any, *, max_length: int = 2000) -> str:
     normalized = str(value).strip()
@@ -55,6 +42,10 @@ def _safe_divide(numerator: Decimal, denominator: Decimal) -> Decimal:
     if denominator == 0:
         return Decimal("0")
     return numerator / denominator
+
+
+def _replay_validation_error(message: str, **_: Any) -> "PaperValidationError":
+    return PaperValidationError(message)
 
 
 class PaperServiceError(Exception):
@@ -122,6 +113,7 @@ class PaperService:
         self.experiments = experiments
         self.backtests = backtests
         self.market_store = market_store
+        self.replay = StrategyReplayService(market_store)
 
     def start_paper_strategy(
         self,
@@ -132,44 +124,43 @@ class PaperService:
         now: Optional[datetime] = None,
     ) -> dict[str, Any]:
         experiment = self.experiments.get_experiment(_require_text("experiment_id", experiment_id, max_length=120))
-        if experiment["current_status"] not in {"PAPER_ELIGIBLE", "PAPER_RUNNING", "PAPER_PASSED"}:
+        progression = self.experiments.get_progression_state(experiment["experiment_id"])
+        if not progression["permits_paper_run"]:
             raise PaperValidationError(
-                f"experiment must be PAPER_ELIGIBLE, PAPER_RUNNING, or PAPER_PASSED before paper trading; got {experiment['current_status']}"
+                f"experiment is not paper-run ready; got {progression['current_status']}"
             )
 
         actor = _require_text("started_by", started_by, max_length=200)
         backtest_run = self._resolve_successful_backtest(experiment["experiment_id"], run_id=run_id)
         latest_manifest = self.market_store.load_manifest()
-        histories, timeline_points, history_sha256, source_window = self._load_future_histories(
+        loaded_histories = self.replay.load_paper_histories(
             experiment,
             start_dataset_id=experiment["dataset_id"],
             end_dataset_id=latest_manifest.dataset_id,
+            validation_error=_replay_validation_error,
         )
         paper_run_id = self._build_paper_run_id(
             experiment_id=experiment["experiment_id"],
             backtest_run_id=backtest_run["run_id"],
             latest_dataset_id=latest_manifest.dataset_id,
-            history_sha256=history_sha256,
+            history_sha256=loaded_histories.history_sha256,
         )
         if self.store.run_path(paper_run_id).exists() and self.store.result_path(paper_run_id).exists():
             return self._load_run(paper_run_id)
 
         created_at = format_datetime(now or utc_now()) or ""
-        resulting_status = experiment["current_status"]
-        if experiment["current_status"] == "PAPER_ELIGIBLE":
-            self.experiments.transition_experiment_status(
-                experiment["experiment_id"],
-                to_status="PAPER_RUNNING",
-                changed_by=actor,
-                reason=f"paper_run_id={paper_run_id}",
-                now=now,
-            )
-            resulting_status = "PAPER_RUNNING"
+        progression_result = self.experiments.record_paper_run_started(
+            experiment["experiment_id"],
+            changed_by=actor,
+            reason=f"paper_run_id={paper_run_id}",
+            now=now,
+        )
+        resulting_status = progression_result["resulting_status"]
 
         candidate_trades, strategy_rejections = self._simulate_candidate_trades(
             experiment,
             assumptions=backtest_run["artifact"]["assumptions"],
-            histories=histories,
+            histories=loaded_histories.histories,
         )
         observed_trades, missed_fills = self._observe_candidate_trades(
             candidate_trades,
@@ -194,14 +185,14 @@ class PaperService:
             "created_at": created_at,
             "experiment_id": experiment["experiment_id"],
             "backtest_run_id": backtest_run["run_id"],
-            "source_window": source_window,
-            "timeline_points": timeline_points,
+            "source_window": loaded_histories.source_window,
+            "timeline_points": loaded_histories.timeline_points,
             "input_fingerprints": {
                 "backtest_run_id": backtest_run["run_id"],
                 "backtest_artifact_sha256": backtest_run["artifact_sha256"],
                 "backtest_assumptions_sha256": backtest_run["assumptions_sha256"],
                 "config_sha256": experiment["config_sha256"],
-                "history_sha256": history_sha256,
+                "history_sha256": loaded_histories.history_sha256,
                 "latest_dataset_id": latest_manifest.dataset_id,
                 "engine_version": PAPER_ENGINE_VERSION,
             },
@@ -222,8 +213,8 @@ class PaperService:
             "status": "RUNNING",
             "created_at": created_at,
             "latest_dataset_id": latest_manifest.dataset_id,
-            "history_sha256": history_sha256,
-            "artifact_sha256": hashlib.sha256(_canonical_json(artifact).encode("utf-8")).hexdigest(),
+            "history_sha256": loaded_histories.history_sha256,
+            "artifact_sha256": hashlib.sha256(canonical_json(artifact).encode("utf-8")).hexdigest(),
             "engine_version": PAPER_ENGINE_VERSION,
         }
         state_payload = {
@@ -239,10 +230,10 @@ class PaperService:
             "promotion_applied": False,
             "promotion_blockers": [],
         }
-        _json_dump(self.store.run_path(paper_run_id), run_payload)
-        _json_dump(self.store.result_path(paper_run_id), artifact)
-        _json_dump(self.store.drift_path(drift_report["report_id"]), drift_report)
-        _json_dump(self.store.state_path(experiment["experiment_id"]), state_payload)
+        write_json(self.store.run_path(paper_run_id), run_payload)
+        write_json(self.store.result_path(paper_run_id), artifact)
+        write_json(self.store.drift_path(drift_report["report_id"]), drift_report)
+        write_json(self.store.state_path(experiment["experiment_id"]), state_payload)
         return self._load_run(paper_run_id)
 
     def stop_paper_strategy(
@@ -260,28 +251,22 @@ class PaperService:
         experiment = self.experiments.get_experiment(experiment_id)
         artifact = self.get_paper_results(state["paper_run_id"])
         drift_report = self._load_drift_report(artifact["drift_report_id"])
-        run_payload = _json_load(self.store.run_path(state["paper_run_id"]))
+        run_payload = read_json(self.store.run_path(state["paper_run_id"]))
         stopped_at = format_datetime(now or utc_now()) or ""
         promotion_applied = False
         promotion_blockers: list[str] = []
         resulting_status = experiment["current_status"]
 
         if drift_report["status"] == "ACCEPTABLE":
-            if experiment["current_status"] == "PAPER_RUNNING":
-                self.experiments.transition_experiment_status(
-                    experiment["experiment_id"],
-                    to_status="PAPER_PASSED",
-                    changed_by=actor,
-                    reason=f"paper_run_id={state['paper_run_id']}",
-                    now=now,
-                )
-                promotion_applied = True
-                resulting_status = "PAPER_PASSED"
-            elif experiment["current_status"] == "PAPER_PASSED":
-                promotion_blockers.append("experiment already in PAPER_PASSED")
-                resulting_status = "PAPER_PASSED"
-            else:
-                promotion_blockers.append("experiment must be PAPER_RUNNING before paper completion promotion")
+            promotion = self.experiments.record_paper_run_accepted(
+                experiment["experiment_id"],
+                changed_by=actor,
+                reason=f"paper_run_id={state['paper_run_id']}",
+                now=now,
+            )
+            promotion_applied = bool(promotion["applied"])
+            resulting_status = promotion["resulting_status"]
+            promotion_blockers.extend(promotion["blockers"])
         else:
             promotion_blockers.append("paper drift report is not acceptable")
 
@@ -293,8 +278,8 @@ class PaperService:
         run_payload["status"] = "STOPPED"
         run_payload["stopped_at"] = stopped_at
 
-        _json_dump(self.store.run_path(state["paper_run_id"]), run_payload)
-        _json_dump(self.store.state_path(experiment["experiment_id"]), state)
+        write_json(self.store.run_path(state["paper_run_id"]), run_payload)
+        write_json(self.store.state_path(experiment["experiment_id"]), state)
         return state
 
     def get_paper_state(self, experiment_id: str) -> dict[str, Any]:
@@ -302,14 +287,14 @@ class PaperService:
         path = self.store.state_path(normalized_experiment_id)
         if not path.exists():
             raise PaperNotFoundError(f"no paper state found for experiment_id: {normalized_experiment_id}")
-        return _json_load(path)
+        return read_json(path)
 
     def get_paper_results(self, paper_run_id: str) -> dict[str, Any]:
         normalized_run_id = _require_text("paper_run_id", paper_run_id, max_length=160)
         path = self.store.result_path(normalized_run_id)
         if not path.exists():
             raise PaperNotFoundError(f"unknown paper_run_id: {normalized_run_id}")
-        return _json_load(path)
+        return read_json(path)
 
     def analyze_paper_vs_backtest_drift(
         self,
@@ -326,7 +311,7 @@ class PaperService:
         return self._load_drift_report(artifact["drift_report_id"])
 
     def _load_run(self, paper_run_id: str) -> dict[str, Any]:
-        payload = _json_load(self.store.run_path(paper_run_id))
+        payload = read_json(self.store.run_path(paper_run_id))
         payload["artifact"] = self.get_paper_results(paper_run_id)
         payload["drift_report"] = self._load_drift_report(payload["artifact"]["drift_report_id"])
         return payload
@@ -336,7 +321,7 @@ class PaperService:
         path = self.store.drift_path(normalized_report_id)
         if not path.exists():
             raise PaperNotFoundError(f"unknown drift report: {normalized_report_id}")
-        return _json_load(path)
+        return read_json(path)
 
     def _resolve_successful_backtest(self, experiment_id: str, *, run_id: Optional[str]) -> dict[str, Any]:
         if run_id is not None:
@@ -344,7 +329,7 @@ class PaperService:
 
         candidates: list[dict[str, Any]] = []
         for path in sorted(self.backtests.store.runs_dir.glob("*.json")):
-            payload = _json_load(path)
+            payload = read_json(path)
             if payload.get("experiment_id") != experiment_id or payload.get("status") != "SUCCEEDED":
                 continue
             candidates.append(payload)
@@ -358,83 +343,13 @@ class PaperService:
         run_path = self.backtests.store.run_path(normalized_run_id)
         if not run_path.exists():
             raise BacktestNotFoundError(f"unknown run_id: {normalized_run_id}")
-        payload = _json_load(run_path)
+        payload = read_json(run_path)
         if payload.get("experiment_id") != experiment_id:
             raise PaperValidationError(f"run_id {normalized_run_id} does not belong to experiment_id {experiment_id}")
         if payload.get("status") != "SUCCEEDED":
             raise PaperValidationError(f"run_id {normalized_run_id} must succeed before paper trading")
         payload["artifact"] = self.backtests.get_backtest_artifacts(normalized_run_id)
         return payload
-
-    def _load_future_histories(
-        self,
-        experiment: dict[str, Any],
-        *,
-        start_dataset_id: str,
-        end_dataset_id: str,
-    ) -> tuple[dict[str, list[HistoryPoint]], int, str, dict[str, Any]]:
-        start_manifest = self.market_store.load_manifest(start_dataset_id)
-        end_manifest = self.market_store.load_manifest(end_dataset_id)
-        start_time = parse_datetime(start_manifest.ingested_at)
-        end_time = parse_datetime(end_manifest.ingested_at)
-        if start_time is None or end_time is None:
-            raise PaperValidationError("paper trading requires versioned dataset timestamps")
-        if end_time <= start_time:
-            raise PaperValidationError("paper trading requires at least one newer dataset after the backtest dataset")
-
-        histories: dict[str, list[HistoryPoint]] = {}
-        history_fingerprint_rows: list[dict[str, Any]] = []
-        market_ids = self.backtests._market_ids_for_experiment(experiment)
-        for market_id in market_ids:
-            points: list[HistoryPoint] = []
-            for row in self.market_store.load_history(market_id):
-                recorded_at = parse_datetime(row.get("recorded_at"))
-                if recorded_at is None or recorded_at <= start_time or recorded_at > end_time:
-                    continue
-                record = NormalizedMarketRecord.from_dict(row["record"])
-                market_end_time = parse_datetime(record.end_time)
-                if market_end_time is not None and recorded_at > market_end_time:
-                    raise PaperValidationError(
-                        f"future history for {market_id} includes post-resolution data at {format_datetime(recorded_at)}"
-                    )
-                point = HistoryPoint(
-                    market_id=market_id,
-                    timestamp=recorded_at,
-                    end_time=market_end_time,
-                    price_proxy=self.backtests._price_proxy(record),
-                    liquidity=self.backtests._decimal_text(record.liquidity),
-                    volume=self.backtests._decimal_text(record.volume),
-                )
-                points.append(point)
-                history_fingerprint_rows.append(
-                    {
-                        "market_id": market_id,
-                        "timestamp": format_datetime(recorded_at),
-                        "price_proxy": _format_decimal(point.price_proxy),
-                        "liquidity": _format_decimal(point.liquidity),
-                        "volume": _format_decimal(point.volume),
-                    }
-                )
-            points.sort(key=lambda item: item.timestamp)
-            if len(points) < 2:
-                raise PaperValidationError(
-                    f"insufficient future history for market {market_id}; need at least 2 post-backtest points"
-                )
-            histories[market_id] = points
-
-        timeline_points = min(len(points) for points in histories.values())
-        history_sha256 = hashlib.sha256(_canonical_json(history_fingerprint_rows).encode("utf-8")).hexdigest()
-        return (
-            histories,
-            timeline_points,
-            history_sha256,
-            {
-                "start_dataset_id": start_dataset_id,
-                "end_dataset_id": end_dataset_id,
-                "start_at": start_manifest.ingested_at,
-                "end_at": end_manifest.ingested_at,
-            },
-        )
 
     def _simulate_candidate_trades(
         self,
@@ -443,18 +358,14 @@ class PaperService:
         assumptions: dict[str, Any],
         histories: dict[str, list[HistoryPoint]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        if experiment["strategy_family"] == "midpoint_reversion":
-            trades, rejections = self.backtests._simulate_midpoint_reversion(experiment, assumptions, histories)
-        elif experiment["strategy_family"] == "resolution_drift":
-            trades, rejections = self.backtests._simulate_resolution_drift(experiment, assumptions, histories)
-        elif experiment["strategy_family"] == "cross_market_arbitrage":
-            trades, rejections = self.backtests._simulate_cross_market_arbitrage(experiment, assumptions, histories)
-        else:
-            raise PaperValidationError(f"unsupported strategy_family: {experiment['strategy_family']}")
-
-        for trade in trades:
-            trade["split"] = "paper"
-        return trades, rejections
+        replay_result = self.replay.replay_strategy(
+            experiment,
+            assumptions,
+            histories,
+            split_name_fn=lambda _index, _total: "paper",
+            validation_error=_replay_validation_error,
+        )
+        return replay_result.trades, replay_result.rejections
 
     def _observe_candidate_trades(
         self,
@@ -588,6 +499,16 @@ class PaperService:
             "avg_adverse_selection_bps": _format_decimal(avg_adverse_selection_bps),
             "paper_days": _format_decimal(paper_days, places="0.0001"),
         }
+
+    def _replay_validation_error(
+        self,
+        message: str,
+        *,
+        code: str = "invalid_paper",
+        violations: Optional[list[dict[str, Any]]] = None,
+    ) -> PaperValidationError:
+        del code, violations
+        return PaperValidationError(message)
 
     def _build_drift_report(
         self,
@@ -724,9 +645,6 @@ class PaperService:
 
 
 def build_paper_service(root: Path) -> PaperService:
-    return PaperService(
-        FileSystemPaperStore(root),
-        experiments=build_experiment_service(root),
-        backtests=build_backtest_service(root),
-        market_store=FileSystemMarketStore(root),
-    )
+    from .runtime import build_workspace
+
+    return build_workspace(root).paper

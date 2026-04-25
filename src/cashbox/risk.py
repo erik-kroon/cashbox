@@ -4,19 +4,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
-import json
 from pathlib import Path
 from typing import Any, Optional
 
-from .experiments import ExperimentService, build_experiment_service
+from .experiments import ExperimentService, LIVE_TRADING_PERMITTED_EXPERIMENT_STATUSES
 from .ingest import FileSystemMarketStore
 from .models import format_datetime, parse_datetime, utc_now
+from .persistence import append_jsonl, canonical_copy, canonical_json, read_json, read_jsonl, write_json
 from .research import ResearchMarketReadPath
 
 RISK_POLICY_VERSION = 1
 RISK_DECISION_OUTCOMES = ("ALLOW", "REJECT", "PENDING_HUMAN_APPROVAL")
 HUMAN_REVIEW_DECISIONS = ("APPROVE", "REJECT")
-LIVE_TRADING_EXPERIMENT_STATUSES = ("TINY_LIVE_ELIGIBLE", "TINY_LIVE_RUNNING", "PRODUCTION_APPROVED")
+LIVE_TRADING_EXPERIMENT_STATUSES = LIVE_TRADING_PERMITTED_EXPERIMENT_STATUSES
 TERMINAL_INTENT_STATUSES = ("ALLOWED", "REJECTED")
 
 DEFAULT_RISK_POLICY: dict[str, Any] = {
@@ -50,41 +50,6 @@ DEFAULT_RISK_POLICY: dict[str, Any] = {
     "strategy_halt": False,
     "tick_size": "0.01",
 }
-
-
-def _canonical_json(payload: Any) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-
-def _canonical_copy(payload: Any) -> Any:
-    return json.loads(_canonical_json(payload))
-
-
-def _json_dump(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _json_load(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _jsonl_append(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True))
-        handle.write("\n")
-
-
-def _jsonl_load(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            rows.append(json.loads(line))
-    return rows
-
 
 def _require_text(name: str, value: Any, *, max_length: int = 2000) -> str:
     normalized = str(value).strip()
@@ -266,8 +231,8 @@ class RiskGatewayService:
             "human_review_reason": None,
             "updated_at": created_at,
         }
-        _json_dump(path, payload)
-        _json_dump(self.store.state_path(intent_id), state)
+        write_json(path, payload)
+        write_json(self.store.state_path(intent_id), state)
         return self.get_trade_intent(intent_id)
 
     def review_trade_intent(
@@ -300,11 +265,11 @@ class RiskGatewayService:
             "reason": _require_text("reason", reason, max_length=2000),
             "created_at": created_at,
         }
-        _jsonl_append(self.store.review_path(intent["intent_id"]), review_payload)
+        append_jsonl(self.store.review_path(intent["intent_id"]), review_payload)
         state["human_review_status"] = normalized_decision
         state["human_review_reason"] = review_payload["reason"]
         state["updated_at"] = created_at
-        _json_dump(self.store.state_path(intent["intent_id"]), state)
+        write_json(self.store.state_path(intent["intent_id"]), state)
         return review_payload
 
     def evaluate_trade_intent(
@@ -317,13 +282,14 @@ class RiskGatewayService:
     ) -> dict[str, Any]:
         intent = self._load_intent(intent_id)
         experiment = self.experiments.get_experiment(intent["experiment_id"])
+        progression = self.experiments.get_progression_state(experiment["experiment_id"])
         state = self._load_state(intent["intent_id"])
         reviews = self._load_reviews(intent["intent_id"])
         latest_review = reviews[-1] if reviews else None
         current_time = now or utc_now()
         created_at = format_datetime(current_time) or ""
         merged_policy = self._normalize_policy(policy)
-        policy_sha256 = hashlib.sha256(_canonical_json(merged_policy).encode("utf-8")).hexdigest()
+        policy_sha256 = hashlib.sha256(canonical_json(merged_policy).encode("utf-8")).hexdigest()
         market_metadata = self._load_market_metadata(intent["market_id"])
         order_request = intent["order_request"]
         order_notional = _decimal_text(order_request["notional_usd"], field_name="order_request.notional_usd")
@@ -347,14 +313,14 @@ class RiskGatewayService:
 
         hard_checks = {
             "strategy_enabled": self._check(
-                passed=experiment["current_status"] not in {"DISABLED", "REJECTED", "RETIRED"},
+                passed=not bool(progression["is_terminal"]),
                 observed=experiment["current_status"],
                 required="not terminal",
             ),
             "strategy_stage_permits_live": self._check(
-                passed=experiment["current_status"] in LIVE_TRADING_EXPERIMENT_STATUSES,
+                passed=bool(progression["permits_live_trading"]),
                 observed=experiment["current_status"],
-                required=list(LIVE_TRADING_EXPERIMENT_STATUSES),
+                required=True,
             ),
             "strategy_has_approved_capital_limits": self._check(
                 passed=_decimal_text(merged_policy["max_notional_usd"], field_name="policy.max_notional_usd") > 0,
@@ -522,7 +488,7 @@ class RiskGatewayService:
         )
         path = self.store.decision_path(decision_id)
         if path.exists():
-            payload = _json_load(path)
+            payload = read_json(path)
         else:
             payload = {
                 "decision_id": decision_id,
@@ -548,7 +514,7 @@ class RiskGatewayService:
                     "notional_usd": order_request["notional_usd"],
                 },
             }
-            _json_dump(path, payload)
+            write_json(path, payload)
 
         state.update(
             {
@@ -561,7 +527,7 @@ class RiskGatewayService:
                 "updated_at": created_at,
             }
         )
-        _json_dump(self.store.state_path(intent["intent_id"]), state)
+        write_json(self.store.state_path(intent["intent_id"]), state)
         return payload
 
     def get_trade_intent(self, intent_id: str) -> dict[str, Any]:
@@ -580,23 +546,23 @@ class RiskGatewayService:
         path = self.store.decision_path(normalized_decision_id)
         if not path.exists():
             raise RiskNotFoundError(f"unknown decision_id: {normalized_decision_id}")
-        return _json_load(path)
+        return read_json(path)
 
     def _load_intent(self, intent_id: str) -> dict[str, Any]:
         normalized_intent_id = _require_text("intent_id", intent_id, max_length=160)
         path = self.store.intent_path(normalized_intent_id)
         if not path.exists():
             raise RiskNotFoundError(f"unknown intent_id: {normalized_intent_id}")
-        return _json_load(path)
+        return read_json(path)
 
     def _load_reviews(self, intent_id: str) -> list[dict[str, Any]]:
-        return _jsonl_load(self.store.review_path(intent_id))
+        return read_jsonl(self.store.review_path(intent_id))
 
     def _load_state(self, intent_id: str) -> dict[str, Any]:
         path = self.store.state_path(intent_id)
         if not path.exists():
             raise RiskNotFoundError(f"missing state for intent_id: {intent_id}")
-        return _json_load(path)
+        return read_json(path)
 
     def _normalize_order_request(self, payload: dict[str, Any], *, created_at: str) -> dict[str, Any]:
         market_id = _require_text("order_request.market_id", payload.get("market_id"), max_length=120)
@@ -644,13 +610,13 @@ class RiskGatewayService:
 
     def _normalize_policy(self, policy: Optional[dict[str, Any]]) -> dict[str, Any]:
         if policy is None:
-            merged = _canonical_copy(DEFAULT_RISK_POLICY)
+            merged = canonical_copy(DEFAULT_RISK_POLICY)
         else:
             if not isinstance(policy, dict):
                 raise RiskValidationError("policy must be a JSON object")
-            merged = _canonical_copy(DEFAULT_RISK_POLICY)
+            merged = canonical_copy(DEFAULT_RISK_POLICY)
             for key, value in policy.items():
-                merged[key] = _canonical_copy(value)
+                merged[key] = canonical_copy(value)
 
         merged["allowed_categories"] = [str(item).strip().lower() for item in merged["allowed_categories"] if str(item).strip()]
         merged["allowed_order_classes"] = [
@@ -771,7 +737,7 @@ class RiskGatewayService:
         created_at: str,
         submitted_by: str,
     ) -> str:
-        basis = f"{experiment_id}:{created_at}:{submitted_by}:{_canonical_json(order_request)}"
+        basis = f"{experiment_id}:{created_at}:{submitted_by}:{canonical_json(order_request)}"
         return f"intent-{hashlib.sha256(basis.encode('utf-8')).hexdigest()[:12]}"
 
     def _build_review_id(
@@ -811,10 +777,6 @@ RiskService = RiskGatewayService
 
 
 def build_risk_gateway_service(root: Path) -> RiskGatewayService:
-    market_store = FileSystemMarketStore(root)
-    return RiskGatewayService(
-        FileSystemRiskStore(root),
-        experiments=build_experiment_service(root),
-        market_store=market_store,
-        read_path=ResearchMarketReadPath(market_store),
-    )
+    from .runtime import build_workspace
+
+    return build_workspace(root).risk
