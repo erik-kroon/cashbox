@@ -194,6 +194,9 @@ cashbox create-trade-intent <experiment-id> \
 cashbox evaluate-trade-intent <intent-id>
 cashbox review-trade-intent <intent-id> --reviewer ops-oncall --decision approve --reason "approved for tiny-live"
 cashbox evaluate-trade-intent <intent-id>
+cashbox submit-approved-order <intent-id> --approval-token <approval-token>
+cashbox get-execution-state <intent-id>
+cashbox get-execution-record <execution-id>
 cashbox get-risk-decision <decision-id>
 ```
 
@@ -204,6 +207,7 @@ cashbox get-risk-decision <decision-id>
 - `src/cashbox/evaluator.py`: experiment scoring and deterministic paper-promotion gates
 - `src/cashbox/paper.py`: paper-trading runs, state transitions, and backtest drift analysis
 - `src/cashbox/risk.py`: trade intents, risk evaluation, human review, and approval tokens
+- `src/cashbox/execution.py`: signer-service release, live-executor submission, and execution audit trail
 - `src/cashbox/ingest.py`: raw and normalized market ingest
 - `src/cashbox/research.py`: deterministic research read path
 - `src/cashbox/experiments.py`: experiment registry, immutable configs, and lifecycle tracking
@@ -218,8 +222,8 @@ cashbox get-risk-decision <decision-id>
 
 The next slices after this one are:
 
-1. evaluator and paper-promotion gates
-2. paper trading, drift reporting, and execution controls
-3. signer/executor integration, cancel-all flows, and broader live-state reconciliation
+1. cancel-all flows, broader live-state reconciliation, and fill/position tracking
+2. governance approvals, RBAC, and policy lifecycle controls
+3. richer observability for signer, executor, and platform health regressions
 
-The repository should keep moving in that order so the research path grows before any live order path exists.
+The repository should keep moving in that order so the live boundary stays narrow, auditable, and easy to reason about.

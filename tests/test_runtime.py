@@ -31,6 +31,7 @@ class CashboxWorkspaceTests(unittest.TestCase):
         self.assertIs(workspace.risk.experiments, workspace.experiments)
         self.assertIs(workspace.risk.market_store, workspace.market_store)
         self.assertIs(workspace.risk.read_path, workspace.read_path)
+        self.assertIs(workspace.execution.risk, workspace.risk)
         self.assertIs(workspace.gateway.read_path, workspace.read_path)
 
     def test_cli_context_uses_single_workspace_runtime(self) -> None:
@@ -44,6 +45,7 @@ class CashboxWorkspaceTests(unittest.TestCase):
         self.assertIs(context.workspace.evaluator, context.evaluator)
         self.assertIs(context.workspace.paper, context.paper)
         self.assertIs(context.workspace.risk, context.risk)
+        self.assertIs(context.workspace.execution, context.execution)
         self.assertIs(context.workspace.gateway, context.gateway)
 
 
