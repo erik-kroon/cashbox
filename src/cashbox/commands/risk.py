@@ -43,7 +43,7 @@ def register(subparsers: object) -> None:
         handler=_evaluate_trade_intent,
     )
     evaluate_trade_intent.add_argument("intent_id")
-    evaluate_trade_intent.add_argument("--policy-json", default="{}")
+    evaluate_trade_intent.add_argument("--policy-json")
     evaluate_trade_intent.add_argument("--decided-by", default="risk-gateway")
 
     risk_decision = register_command(
@@ -91,7 +91,10 @@ def _review_trade_intent(context: CLIContext, args: object) -> int:
 
 
 def _evaluate_trade_intent(context: CLIContext, args: object) -> int:
-    policy = parse_json_argument(context, args.policy_json, flag_name="--policy-json")
+    if args.policy_json is None:
+        policy = context.governance.get_active_policy("risk")["policy"]
+    else:
+        policy = parse_json_argument(context, args.policy_json, flag_name="--policy-json")
     try:
         result = context.risk.evaluate_trade_intent(
             args.intent_id,
