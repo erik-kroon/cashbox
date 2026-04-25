@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from ..backtests import BacktestService
 from ..evaluator import EvaluatorService
+from ..execution import ExecutionService
 from ..experiments import ExperimentService
 from ..gateway import AgentMarketGateway
 from ..ingest import FileSystemMarketStore
@@ -34,6 +35,7 @@ class CLIContext:
     evaluator: EvaluatorService
     paper: PaperService
     risk: RiskGatewayService
+    execution: ExecutionService
 
     def emit(self, payload: Any) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -57,6 +59,7 @@ def build_context(*, root: Path, parser: argparse.ArgumentParser) -> CLIContext:
         evaluator=workspace.evaluator,
         paper=workspace.paper,
         risk=workspace.risk,
+        execution=workspace.execution,
     )
 
 

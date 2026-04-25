@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .backtests import BacktestService, FileSystemBacktestStore
 from .evaluator import EvaluatorService, FileSystemEvaluationStore
+from .execution import ExecutionService, FileSystemExecutionStore
 from .experiments import ExperimentService, FileSystemExperimentStore
 from .gateway import AgentMarketGateway, FileSystemAgentGatewayStore
 from .ingest import FileSystemMarketStore
@@ -23,6 +24,7 @@ class CashboxWorkspace:
     evaluator: EvaluatorService
     paper: PaperService
     risk: RiskGatewayService
+    execution: ExecutionService
     gateway: AgentMarketGateway
 
 
@@ -53,6 +55,7 @@ def build_workspace(root: Path) -> CashboxWorkspace:
         market_store=market_store,
         read_path=read_path,
     )
+    execution = ExecutionService(FileSystemExecutionStore(root_path), risk=risk)
     gateway = AgentMarketGateway(FileSystemAgentGatewayStore(root_path), read_path)
     return CashboxWorkspace(
         root=root_path,
@@ -63,5 +66,6 @@ def build_workspace(root: Path) -> CashboxWorkspace:
         evaluator=evaluator,
         paper=paper,
         risk=risk,
+        execution=execution,
         gateway=gateway,
     )
