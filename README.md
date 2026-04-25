@@ -95,6 +95,7 @@ The repository now also includes:
 - a filesystem-backed backtest service that replays point-in-time market history and models fees, latency, slippage, staleness, and partial fills deterministically
 - a filesystem-backed paper-trading service that replays post-backtest history, measures fill drift, and persists paper run state
 - a filesystem-backed trade-intent and risk-gateway service with deterministic live checks, auditable decisions, and explicit human approval/rejection records
+- a filesystem-backed live execution service with cancel-all controls, global halt state, fill tracking, and reconciliation snapshots
 
 ## Local Usage
 
@@ -197,6 +198,13 @@ cashbox evaluate-trade-intent <intent-id>
 cashbox submit-approved-order <intent-id> --approval-token <approval-token>
 cashbox get-execution-state <intent-id>
 cashbox get-execution-record <execution-id>
+cashbox record-live-fill <execution-id> --filled-quantity 5 --fill-price 0.52
+cashbox request-strategy-cancel-all <experiment-id> --reason "operator requested stop"
+cashbox request-global-halt --reason "hard halt after venue anomaly"
+cashbox get-live-controls
+cashbox reconcile-live-state \
+  --venue-orders-json '[{"order_id":"ord-123","status":"SUBMITTED"}]' \
+  --venue-positions-json '[{"market_id":"btc-150k","outcome":"Yes","net_quantity":"5"}]'
 cashbox get-risk-decision <decision-id>
 ```
 
@@ -207,7 +215,7 @@ cashbox get-risk-decision <decision-id>
 - `src/cashbox/evaluator.py`: experiment scoring and deterministic paper-promotion gates
 - `src/cashbox/paper.py`: paper-trading runs, state transitions, and backtest drift analysis
 - `src/cashbox/risk.py`: trade intents, risk evaluation, human review, and approval tokens
-- `src/cashbox/execution.py`: signer-service release, live-executor submission, and execution audit trail
+- `src/cashbox/execution.py`: signer-service release, live-executor submission, cancel-all, halt controls, fill tracking, and reconciliation
 - `src/cashbox/ingest.py`: raw and normalized market ingest
 - `src/cashbox/research.py`: deterministic research read path
 - `src/cashbox/experiments.py`: experiment registry, immutable configs, and lifecycle tracking
@@ -222,8 +230,7 @@ cashbox get-risk-decision <decision-id>
 
 The next slices after this one are:
 
-1. cancel-all flows, broader live-state reconciliation, and fill/position tracking
-2. governance approvals, RBAC, and policy lifecycle controls
-3. richer observability for signer, executor, and platform health regressions
+1. governance approvals, RBAC, and policy lifecycle controls
+2. richer observability for signer, executor, and platform health regressions
 
 The repository should keep moving in that order so the live boundary stays narrow, auditable, and easy to reason about.

@@ -12,6 +12,7 @@ from ..evaluator import EvaluatorService
 from ..execution import ExecutionService
 from ..experiments import ExperimentService
 from ..gateway import AgentMarketGateway
+from ..governance import GovernanceService
 from ..ingest import FileSystemMarketStore
 from ..models import parse_datetime
 from ..paper import PaperService
@@ -36,6 +37,7 @@ class CLIContext:
     paper: PaperService
     risk: RiskGatewayService
     execution: ExecutionService
+    governance: GovernanceService
 
     def emit(self, payload: Any) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -60,6 +62,7 @@ def build_context(*, root: Path, parser: argparse.ArgumentParser) -> CLIContext:
         paper=workspace.paper,
         risk=workspace.risk,
         execution=workspace.execution,
+        governance=workspace.governance,
     )
 
 
