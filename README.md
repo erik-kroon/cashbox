@@ -94,6 +94,7 @@ The repository now also includes:
 - a filesystem-backed experiment service for templates, validation, creation, cloning, and lifecycle tracking
 - a filesystem-backed backtest service that replays point-in-time market history and models fees, latency, slippage, staleness, and partial fills deterministically
 - a filesystem-backed paper-trading service that replays post-backtest history, measures fill drift, and persists paper run state
+- a filesystem-backed trade-intent and risk-gateway service with deterministic live checks, auditable decisions, and explicit human approval/rejection records
 
 ## Local Usage
 
@@ -184,12 +185,25 @@ cashbox analyze-paper-vs-backtest-drift <experiment-id>
 cashbox stop-paper-strategy <experiment-id>
 ```
 
+Create a live-adjacent trade intent and evaluate the HITL risk path:
+
+```bash
+cashbox create-trade-intent <experiment-id> \
+  --submitted-by hermes \
+  --order-json '{"market_id":"btc-150k","outcome":"Yes","side":"BUY","order_class":"TAKER_IOC","time_in_force":"IOC","price":"0.52","quantity":"20","estimated_fee_bps":"10","estimated_slippage_bps":"8"}'
+cashbox evaluate-trade-intent <intent-id>
+cashbox review-trade-intent <intent-id> --reviewer ops-oncall --decision approve --reason "approved for tiny-live"
+cashbox evaluate-trade-intent <intent-id>
+cashbox get-risk-decision <decision-id>
+```
+
 ## Repository Layout
 
 - `docs/prd.md`: target product and architecture definition
 - `src/cashbox/backtests.py`: deterministic backtest execution, artifacts, and failure explanations
 - `src/cashbox/evaluator.py`: experiment scoring and deterministic paper-promotion gates
 - `src/cashbox/paper.py`: paper-trading runs, state transitions, and backtest drift analysis
+- `src/cashbox/risk.py`: trade intents, risk evaluation, human review, and approval tokens
 - `src/cashbox/ingest.py`: raw and normalized market ingest
 - `src/cashbox/research.py`: deterministic research read path
 - `src/cashbox/experiments.py`: experiment registry, immutable configs, and lifecycle tracking
@@ -206,6 +220,6 @@ The next slices after this one are:
 
 1. evaluator and paper-promotion gates
 2. paper trading, drift reporting, and execution controls
-3. trade intent, risk rejection, and controlled live boundaries
+3. signer/executor integration, cancel-all flows, and broader live-state reconciliation
 
 The repository should keep moving in that order so the research path grows before any live order path exists.

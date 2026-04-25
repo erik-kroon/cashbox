@@ -18,6 +18,7 @@ from .ingest import FileSystemMarketStore, ingest_polymarket_markets
 from .models import MarketFilter, parse_datetime
 from .paper import PaperServiceError, build_paper_service
 from .research import ResearchMarketReadPath
+from .risk import RiskNotFoundError, RiskServiceError, build_risk_gateway_service
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -178,6 +179,44 @@ def build_parser() -> argparse.ArgumentParser:
     paper_drift.add_argument("experiment_id")
     paper_drift.add_argument("--paper-run-id")
 
+    create_trade_intent = subparsers.add_parser(
+        "create-trade-intent",
+        help="Persist a structured live-adjacent trade intent for later risk evaluation.",
+    )
+    create_trade_intent.add_argument("experiment_id")
+    create_trade_intent.add_argument("--submitted-by", required=True)
+    create_trade_intent.add_argument("--order-json", required=True)
+    create_trade_intent.add_argument("--rationale")
+
+    get_trade_intent = subparsers.add_parser(
+        "get-trade-intent",
+        help="Read a persisted trade intent with its latest state, reviews, and decision.",
+    )
+    get_trade_intent.add_argument("intent_id")
+
+    review_trade_intent = subparsers.add_parser(
+        "review-trade-intent",
+        help="Attach a human approve/reject review to a trade intent.",
+    )
+    review_trade_intent.add_argument("intent_id")
+    review_trade_intent.add_argument("--reviewer", required=True)
+    review_trade_intent.add_argument("--decision", required=True, choices=("approve", "reject"))
+    review_trade_intent.add_argument("--reason", required=True)
+
+    evaluate_trade_intent = subparsers.add_parser(
+        "evaluate-trade-intent",
+        help="Evaluate a trade intent against deterministic live risk checks and HITL approval status.",
+    )
+    evaluate_trade_intent.add_argument("intent_id")
+    evaluate_trade_intent.add_argument("--policy-json", default="{}")
+    evaluate_trade_intent.add_argument("--decided-by", default="risk-gateway")
+
+    risk_decision = subparsers.add_parser(
+        "get-risk-decision",
+        help="Read a persisted risk decision by decision id.",
+    )
+    risk_decision.add_argument("decision_id")
+
     credential = subparsers.add_parser(
         "issue-agent-credential",
         help="Issue a scoped credential for the read-only agent gateway.",
@@ -210,6 +249,7 @@ def main() -> int:
     backtests = build_backtest_service(args.root)
     evaluator = build_evaluator_service(args.root)
     paper = build_paper_service(args.root)
+    risk = build_risk_gateway_service(args.root)
 
     if args.command == "ingest-file":
         payload = json.loads(args.input.read_text())
@@ -476,6 +516,66 @@ def main() -> int:
                 paper_run_id=args.paper_run_id,
             )
         except PaperServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "create-trade-intent":
+        try:
+            order_request = json.loads(args.order_json)
+            result = risk.create_trade_intent(
+                args.experiment_id,
+                order_request,
+                submitted_by=args.submitted_by,
+                rationale=args.rationale,
+            )
+        except json.JSONDecodeError as exc:
+            parser.error(f"invalid --order-json payload: {exc}")
+        except (ExperimentServiceError, RiskServiceError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "get-trade-intent":
+        try:
+            result = risk.get_trade_intent(args.intent_id)
+        except RiskNotFoundError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "review-trade-intent":
+        try:
+            result = risk.review_trade_intent(
+                args.intent_id,
+                reviewer=args.reviewer,
+                decision=args.decision,
+                reason=args.reason,
+            )
+        except RiskServiceError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "evaluate-trade-intent":
+        try:
+            policy = json.loads(args.policy_json)
+            result = risk.evaluate_trade_intent(
+                args.intent_id,
+                policy=policy,
+                decided_by=args.decided_by,
+            )
+        except json.JSONDecodeError as exc:
+            parser.error(f"invalid --policy-json payload: {exc}")
+        except (ExperimentServiceError, RiskServiceError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "get-risk-decision":
+        try:
+            result = risk.get_risk_decision(args.decision_id)
+        except RiskNotFoundError as exc:
             parser.error(str(exc))
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
