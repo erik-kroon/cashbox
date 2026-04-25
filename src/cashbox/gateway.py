@@ -3,13 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import hashlib
-import json
 from pathlib import Path
 import secrets
 from typing import Any, Optional
 
-from .ingest import FileSystemMarketStore
 from .models import MarketFilter, format_datetime, parse_datetime, utc_now
+from .persistence import append_jsonl, canonical_json, read_json, read_jsonl, write_json
 from .research import ResearchMarketReadPath
 
 READ_ONLY_TOOL_NAMES = (
@@ -56,13 +55,8 @@ _FORBIDDEN_ARGUMENT_SNIPPETS = (
     "`",
 )
 
-
-def _canonical_json(payload: Any) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-
 def _sha256_json(payload: Any) -> str:
-    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 def _sha256_text(value: str) -> str:
@@ -172,7 +166,7 @@ class FileSystemAgentGatewayStore:
         )
         path = self.credential_path(token_sha256)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(credential.to_dict(), indent=2, sort_keys=True) + "\n")
+        write_json(path, credential.to_dict())
         return credential, raw_token
 
     def load_credential(self, token: str) -> AgentGatewayCredential:
@@ -180,25 +174,16 @@ class FileSystemAgentGatewayStore:
         path = self.credential_path(token_sha256)
         if not path.exists():
             raise AgentAuthenticationError("unknown gateway credential")
-        credential = AgentGatewayCredential.from_dict(json.loads(path.read_text()))
+        credential = AgentGatewayCredential.from_dict(read_json(path))
         if credential.token_sha256 != token_sha256:
             raise AgentAuthenticationError("invalid gateway credential")
         return credential
 
     def append_audit_record(self, payload: dict[str, Any]) -> None:
-        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.audit_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True))
-            handle.write("\n")
+        append_jsonl(self.audit_path, payload)
 
     def load_audit_records(self) -> list[dict[str, Any]]:
-        if not self.audit_path.exists():
-            return []
-        rows: list[dict[str, Any]] = []
-        with self.audit_path.open(encoding="utf-8") as handle:
-            for line in handle:
-                rows.append(json.loads(line))
-        return rows
+        return read_jsonl(self.audit_path)
 
     def count_recent_calls(self, *, credential_id: str, since: datetime) -> int:
         threshold = format_datetime(since) or ""
@@ -497,6 +482,6 @@ class AgentMarketGateway:
 
 
 def build_agent_gateway(root: Path) -> AgentMarketGateway:
-    market_store = FileSystemMarketStore(root)
-    gateway_store = FileSystemAgentGatewayStore(root)
-    return AgentMarketGateway(gateway_store, ResearchMarketReadPath(market_store))
+    from .runtime import build_workspace
+
+    return build_workspace(root).gateway

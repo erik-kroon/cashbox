@@ -4,30 +4,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 import hashlib
-import json
 from pathlib import Path
 from typing import Any, Optional
 
-from .backtests import BacktestNotFoundError, BacktestService, build_backtest_service
-from .experiments import ExperimentService, ExperimentServiceError, build_experiment_service
+from .backtests import BacktestNotFoundError, BacktestService
+from .experiments import ExperimentService, ExperimentServiceError
 from .models import format_datetime, utc_now
+from .persistence import canonical_json, read_json, write_json
 
 EVALUATOR_POLICY_VERSION = 1
 PROMOTION_TARGET_STAGES = ("paper", "tiny_live", "scaled_live")
-
-
-def _canonical_json(payload: Any) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-
-def _json_dump(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _json_load(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
-
 
 def _require_text(name: str, value: Any, *, max_length: int = 2000) -> str:
     normalized = str(value).strip()
@@ -169,7 +155,7 @@ class EvaluatorService:
         )
         path = self.store.score_path(score_id)
         if path.exists():
-            return _json_load(path)
+            return read_json(path)
         payload = {
             "score_id": score_id,
             "created_at": format_datetime(now or utc_now()) or "",
@@ -187,7 +173,7 @@ class EvaluatorService:
             "checks": checks,
             "reasons": reasons,
         }
-        _json_dump(path, payload)
+        write_json(path, payload)
         return payload
 
     def check_promotion_eligibility(
@@ -295,21 +281,15 @@ class EvaluatorService:
         promotion_blockers: list[str] = []
 
         if promote and eligible:
-            if experiment["current_status"] == "WALK_FORWARD_TESTED":
-                self.experiments.transition_experiment_status(
-                    experiment["experiment_id"],
-                    to_status="PAPER_ELIGIBLE",
-                    changed_by=actor,
-                    reason=f"promotion_gate=paper score_id={score['score_id']}",
-                    now=now,
-                )
-                promotion_applied = True
-                resulting_status = "PAPER_ELIGIBLE"
-            elif experiment["current_status"] == "PAPER_ELIGIBLE":
-                promotion_blockers.append("experiment already in PAPER_ELIGIBLE")
-                resulting_status = "PAPER_ELIGIBLE"
-            else:
-                promotion_blockers.append("experiment must be WALK_FORWARD_TESTED before promotion to PAPER_ELIGIBLE")
+            promotion = self.experiments.promote_to_paper_eligible(
+                experiment["experiment_id"],
+                changed_by=actor,
+                reason=f"promotion_gate=paper score_id={score['score_id']}",
+                now=now,
+            )
+            promotion_applied = bool(promotion["applied"])
+            resulting_status = promotion["resulting_status"]
+            promotion_blockers.extend(promotion["blockers"])
 
         decision_id = self._build_decision_id(
             score_id=score["score_id"],
@@ -323,7 +303,7 @@ class EvaluatorService:
         )
         path = self.store.promotion_path(decision_id)
         if path.exists():
-            return _json_load(path)
+            return read_json(path)
         payload = {
             "decision_id": decision_id,
             "created_at": format_datetime(now or utc_now()) or "",
@@ -346,7 +326,7 @@ class EvaluatorService:
             "failed_checks": failed_checks,
             "notes": score["reasons"],
         }
-        _json_dump(path, payload)
+        write_json(path, payload)
         return payload
 
     def _resolve_successful_run(self, experiment_id: str, *, run_id: Optional[str]) -> dict[str, Any]:
@@ -356,7 +336,7 @@ class EvaluatorService:
         runs_dir = self.backtests.store.runs_dir
         candidates: list[dict[str, Any]] = []
         for path in sorted(runs_dir.glob("*.json")):
-            payload = _json_load(path)
+            payload = read_json(path)
             if payload.get("experiment_id") != experiment_id or payload.get("status") != "SUCCEEDED":
                 continue
             candidates.append(payload)
@@ -370,7 +350,7 @@ class EvaluatorService:
         run_path = self.backtests.store.run_path(normalized_run_id)
         if not run_path.exists():
             raise BacktestNotFoundError(f"unknown run_id: {normalized_run_id}")
-        payload = _json_load(run_path)
+        payload = read_json(run_path)
         if payload.get("experiment_id") != experiment_id:
             raise EvaluationValidationError(
                 f"run_id {normalized_run_id} does not belong to experiment_id {experiment_id}"
@@ -481,8 +461,6 @@ EvaluationService = EvaluatorService
 
 
 def build_evaluator_service(root: Path) -> EvaluatorService:
-    return EvaluatorService(
-        FileSystemEvaluationStore(root),
-        experiments=build_experiment_service(root),
-        backtests=build_backtest_service(root),
-    )
+    from .runtime import build_workspace
+
+    return build_workspace(root).evaluator

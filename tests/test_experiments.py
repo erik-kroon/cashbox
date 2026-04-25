@@ -115,6 +115,117 @@ class ExperimentServiceTests(unittest.TestCase):
                 changed_by="evaluator",
             )
 
+    def test_progression_methods_own_readiness_moves_and_live_permissions(self) -> None:
+        experiment = self.service.create_experiment(
+            hypothesis="Promote experiments through explicit progression moves.",
+            strategy_family="midpoint_reversion",
+            config={
+                "market_id": "btc-150k",
+                "lookback_minutes": 15,
+                "entry_zscore": 2.0,
+                "exit_zscore": 0.6,
+                "max_position_usd": 250,
+            },
+            dataset_id="20260424T100000Z-abc123",
+            code_version="git:def5678",
+            generated_by="hermes",
+            now=datetime(2026, 4, 24, 10, 0, tzinfo=timezone.utc),
+        )
+
+        initial_progression = self.service.get_progression_state(experiment["experiment_id"])
+        self.assertFalse(initial_progression["permits_backtest"])
+        self.assertFalse(initial_progression["permits_paper_run"])
+        self.assertFalse(initial_progression["permits_live_trading"])
+
+        self.service.transition_experiment_status(
+            experiment["experiment_id"],
+            to_status="VALIDATED_CONFIG",
+            changed_by="evaluator",
+            now=datetime(2026, 4, 24, 10, 5, tzinfo=timezone.utc),
+        )
+        backtest_progression = self.service.record_backtest_completed(
+            experiment["experiment_id"],
+            changed_by="backtest-runner",
+            reason="run_id=bt-123",
+            now=datetime(2026, 4, 24, 10, 6, tzinfo=timezone.utc),
+        )
+        self.assertTrue(backtest_progression["applied"])
+        self.assertEqual(backtest_progression["resulting_status"], "BACKTESTED")
+        self.assertEqual(
+            [event["to_status"] for event in backtest_progression["status_events"]],
+            ["BACKTEST_QUEUED", "BACKTESTED"],
+        )
+
+        self.service.transition_experiment_status(
+            experiment["experiment_id"],
+            to_status="WALK_FORWARD_TESTED",
+            changed_by="walk-forward-runner",
+            now=datetime(2026, 4, 24, 10, 7, tzinfo=timezone.utc),
+        )
+        paper_gate = self.service.promote_to_paper_eligible(
+            experiment["experiment_id"],
+            changed_by="evaluator",
+            reason="promotion_gate=paper score_id=score-123",
+            now=datetime(2026, 4, 24, 10, 8, tzinfo=timezone.utc),
+        )
+        self.assertTrue(paper_gate["applied"])
+        self.assertEqual(paper_gate["resulting_status"], "PAPER_ELIGIBLE")
+
+        paper_started = self.service.record_paper_run_started(
+            experiment["experiment_id"],
+            changed_by="paper-runner",
+            reason="paper_run_id=paper-123",
+            now=datetime(2026, 4, 24, 10, 9, tzinfo=timezone.utc),
+        )
+        self.assertTrue(paper_started["applied"])
+        self.assertEqual(paper_started["resulting_status"], "PAPER_RUNNING")
+
+        paper_accepted = self.service.record_paper_run_accepted(
+            experiment["experiment_id"],
+            changed_by="paper-runner",
+            reason="paper_run_id=paper-123",
+            now=datetime(2026, 4, 24, 10, 10, tzinfo=timezone.utc),
+        )
+        self.assertTrue(paper_accepted["applied"])
+        self.assertEqual(paper_accepted["resulting_status"], "PAPER_PASSED")
+
+        self.service.transition_experiment_status(
+            experiment["experiment_id"],
+            to_status="TINY_LIVE_ELIGIBLE",
+            changed_by="ops",
+            now=datetime(2026, 4, 24, 10, 11, tzinfo=timezone.utc),
+        )
+        live_progression = self.service.get_progression_state(experiment["experiment_id"])
+        self.assertTrue(live_progression["permits_live_trading"])
+        self.assertTrue(self.service.permits_live_trading(experiment["experiment_id"]))
+
+    def test_progression_methods_report_blockers_without_throwing_for_noop_promotions(self) -> None:
+        experiment = self.service.create_experiment(
+            hypothesis="Report centralized blockers for paper promotion.",
+            strategy_family="midpoint_reversion",
+            config={
+                "market_id": "btc-150k",
+                "lookback_minutes": 15,
+                "entry_zscore": 2.0,
+                "exit_zscore": 0.6,
+                "max_position_usd": 250,
+            },
+            dataset_id="20260424T100000Z-abc123",
+            code_version="git:def5678",
+            generated_by="hermes",
+            now=datetime(2026, 4, 24, 10, 0, tzinfo=timezone.utc),
+        )
+
+        blocked_promotion = self.service.promote_to_paper_eligible(
+            experiment["experiment_id"],
+            changed_by="evaluator",
+        )
+        self.assertFalse(blocked_promotion["applied"])
+        self.assertEqual(
+            blocked_promotion["blockers"],
+            ["experiment must be WALK_FORWARD_TESTED before promotion to PAPER_ELIGIBLE"],
+        )
+
     def test_clone_and_notes_create_new_registry_entries(self) -> None:
         parent = self.service.create_experiment(
             hypothesis="Trade resolution drift in thin contracts.",

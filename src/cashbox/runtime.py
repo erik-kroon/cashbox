@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from .backtests import BacktestService, FileSystemBacktestStore
+from .evaluator import EvaluatorService, FileSystemEvaluationStore
+from .experiments import ExperimentService, FileSystemExperimentStore
+from .gateway import AgentMarketGateway, FileSystemAgentGatewayStore
+from .ingest import FileSystemMarketStore
+from .paper import FileSystemPaperStore, PaperService
+from .research import ResearchMarketReadPath
+from .risk import FileSystemRiskStore, RiskGatewayService
+
+
+@dataclass(frozen=True)
+class CashboxWorkspace:
+    root: Path
+    market_store: FileSystemMarketStore
+    read_path: ResearchMarketReadPath
+    experiments: ExperimentService
+    backtests: BacktestService
+    evaluator: EvaluatorService
+    paper: PaperService
+    risk: RiskGatewayService
+    gateway: AgentMarketGateway
+
+
+def build_workspace(root: Path) -> CashboxWorkspace:
+    root_path = Path(root)
+    market_store = FileSystemMarketStore(root_path)
+    read_path = ResearchMarketReadPath(market_store)
+    experiments = ExperimentService(FileSystemExperimentStore(root_path))
+    backtests = BacktestService(
+        FileSystemBacktestStore(root_path),
+        experiments=experiments,
+        market_store=market_store,
+    )
+    evaluator = EvaluatorService(
+        FileSystemEvaluationStore(root_path),
+        experiments=experiments,
+        backtests=backtests,
+    )
+    paper = PaperService(
+        FileSystemPaperStore(root_path),
+        experiments=experiments,
+        backtests=backtests,
+        market_store=market_store,
+    )
+    risk = RiskGatewayService(
+        FileSystemRiskStore(root_path),
+        experiments=experiments,
+        market_store=market_store,
+        read_path=read_path,
+    )
+    gateway = AgentMarketGateway(FileSystemAgentGatewayStore(root_path), read_path)
+    return CashboxWorkspace(
+        root=root_path,
+        market_store=market_store,
+        read_path=read_path,
+        experiments=experiments,
+        backtests=backtests,
+        evaluator=evaluator,
+        paper=paper,
+        risk=risk,
+        gateway=gateway,
+    )
