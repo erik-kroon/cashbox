@@ -24,11 +24,14 @@ Acceptance:
 
 Add a timeline query that explains how a market, experiment, trade intent, risk decision, execution record, or governance request moved through the system.
 
-Scope:
+Current state:
 
-- Extend existing audit aggregation in `src/cashbox/governance.py` or extract an audit read service if the implementation grows.
-- Add filters for `experiment_id`, `market_id`, `intent_id`, `decision_id`, `execution_id`, and `request_id`.
-- Add `cashbox get-audit-timeline`.
+- `src/cashbox/audit.py` owns aggregate audit event loading, timeline reconstruction, filtering, and reference resolution.
+- `src/cashbox/operator_evidence.py` owns health/operator evidence aggregation and uses the audit trail service for gateway audit evidence.
+- `cashbox get-audit-console` and `cashbox get-audit-timeline` read through the audit trail service.
+
+Remaining scope:
+
 - Cover gateway, governance, risk, execution, and reconciliation events where identifiers are available.
 
 Acceptance:

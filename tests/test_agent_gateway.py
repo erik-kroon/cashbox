@@ -13,6 +13,7 @@ from cashbox.gateway import (
     AgentRateLimitError,
     FileSystemAgentGatewayStore,
 )
+from cashbox.gateway_contract import READ_ONLY_GATEWAY_TOOL_CONTRACT
 from cashbox.ingest import FileSystemMarketStore
 from cashbox.research import ResearchMarketReadPath
 
@@ -108,6 +109,12 @@ class AgentGatewayTests(unittest.TestCase):
         self.assertEqual(audit_rows[0]["tool_name"], "list_active_markets")
         self.assertEqual(audit_rows[0]["status"], "ok")
         self.assertEqual(audit_rows[0]["subject"], "hermes")
+
+    def test_default_gateway_tools_come_from_contract(self) -> None:
+        credential, _token = self.gateway.issue_read_only_credential(subject="hermes")
+
+        self.assertEqual(tuple(credential.allowed_tools), READ_ONLY_GATEWAY_TOOL_CONTRACT.tool_names)
+        self.assertIn("get_top_of_book", READ_ONLY_GATEWAY_TOOL_CONTRACT.tool_names)
 
     def test_gateway_exposes_clob_read_tools(self) -> None:
         self.gateway.issue_read_only_credential(subject="hermes", token="test-token")

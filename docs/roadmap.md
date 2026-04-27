@@ -13,7 +13,7 @@ Cashbox now has a working local control plane:
 - Evaluator gates for paper, tiny-live, and scaled-live readiness.
 - Paper trading runs with persisted state and backtest-vs-paper drift reporting.
 - Trade intents, risk decisions, human review, approval tokens, live submission stubs, cancel-all, global halt, fills, and reconciliation.
-- Governance RBAC, approval requests, policy versioning, emergency halt, and aggregated audit console.
+- Governance RBAC, approval requests, policy versioning, emergency halt, shared audit timelines, and an operator evidence reader for health and incident views.
 
 The main gap is no longer the shape of the trust boundary. The gap is production evidence: richer data, health visibility, repeatable workflows, and adapters that can graduate from local files to durable services without widening the agent's authority.
 
@@ -121,7 +121,7 @@ Acceptance:
 ## Active Next Threads
 
 1. Implement `SystemHealthService` and `cashbox get-system-health`.
-2. Add an audit timeline query by experiment, trade intent, risk decision, execution, and governance request.
+2. Deepen audit timeline and operator evidence queries across experiments, trade intents, risk decisions, executions, governance requests, and health evidence.
 3. Add CLOB order-book/trade fixtures and point-in-time read APIs.
 4. Add walk-forward runner contracts and evaluator gate placeholders.
 5. Extract storage ports before introducing database-backed implementations.

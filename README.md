@@ -65,7 +65,9 @@ Planned production components:
 - `risk-gateway`: enforces live-trading policy and invariants
 - `signer-service`: signs only approved payloads
 - `live-executor`: interfaces with the exchange adapter
-- `governance-service`: handles approvals, RBAC, and audit review
+- `governance-service`: handles approvals, RBAC, and policy lifecycle
+- `audit-trail-service`: reconstructs cross-module audit consoles and timelines
+- `operator-evidence-service`: aggregates operator-facing audit, policy, execution, reconciliation, experiment, backtest, and paper evidence
 
 ## Current Status
 
@@ -74,6 +76,7 @@ This repository is early and currently implements the first three local vertical
 - append-first ingest of Polymarket Gamma market payloads
 - immutable dataset manifests and normalized market snapshots
 - append-only per-market history for point-in-time reads
+- a market history module for metadata, token mapping, CLOB books, trades, and data-health semantics
 - research read APIs for active markets, metadata, timeseries, and ingest health
 - a local agent gateway for approved read-only market tools with audit logging
 - an experiment registry with immutable definitions, append-only lifecycle history, and research notes
@@ -218,8 +221,10 @@ cashbox get-risk-decision <decision-id>
 - `src/cashbox/paper.py`: paper-trading runs, state transitions, and backtest drift analysis
 - `src/cashbox/risk.py`: trade intents, risk evaluation, human review, and approval tokens
 - `src/cashbox/execution.py`: signer-service release, live-executor submission, cancel-all, halt controls, fill tracking, and reconciliation
-- `src/cashbox/ingest.py`: raw and normalized market ingest
-- `src/cashbox/research.py`: deterministic research read path
+- `src/cashbox/operator_evidence.py`: operator-facing evidence aggregation for health, incidents, and dashboards
+- `src/cashbox/market_history.py`: raw/normalized market history, token mapping, CLOB books, trades, and health
+- `src/cashbox/ingest.py`: compatibility ingest facade
+- `src/cashbox/research.py`: deterministic research read facade
 - `src/cashbox/experiments.py`: experiment registry, immutable configs, and lifecycle tracking
 - `src/cashbox/models.py`: normalized market and dataset models
 - `src/cashbox/cli.py`: local ingest and read CLI

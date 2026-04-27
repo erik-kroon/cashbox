@@ -7,57 +7,18 @@ from pathlib import Path
 import secrets
 from typing import Any, Optional
 
-from .models import MarketFilter, format_datetime, parse_datetime, utc_now
+from .gateway_contract import (
+    READ_ONLY_GATEWAY_TOOL_CONTRACT,
+    READ_ONLY_TOOL_NAMES,
+    GatewayToolAuthorizationError,
+    GatewayToolContract,
+    GatewayToolInputError,
+    sanitize_gateway_text,
+)
+from .models import format_datetime, utc_now
 from .persistence import append_jsonl, canonical_json, read_json, read_jsonl, write_json
-from .research import ResearchMarketReadPath
+from .research import ResearchMarketReader
 
-READ_ONLY_TOOL_NAMES = (
-    "get_book_health",
-    "get_ingest_health",
-    "get_market_metadata",
-    "get_market_timeseries",
-    "get_order_book_history",
-    "get_top_of_book",
-    "get_trade_history",
-    "list_active_markets",
-)
-
-_ALLOWED_TIMESERIES_FIELDS = {
-    "active",
-    "archived",
-    "category",
-    "closed",
-    "enable_order_book",
-    "end_time",
-    "event_id",
-    "liquidity",
-    "question",
-    "resolution_source",
-    "source_market_id",
-    "source_received_at",
-    "volume",
-}
-_FORBIDDEN_ARGUMENT_SNIPPETS = (
-    "$(",
-    "../",
-    "/etc/",
-    "/bin/sh",
-    "&&",
-    ";/",
-    ";",
-    "<script",
-    "bash ",
-    "password",
-    "private key",
-    "risk-gateway",
-    "secret",
-    "signer-service",
-    "ssh ",
-    "vault",
-    "zsh ",
-    "|",
-    "`",
-)
 
 def _sha256_json(payload: Any) -> str:
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
@@ -202,9 +163,16 @@ class FileSystemAgentGatewayStore:
 
 
 class AgentMarketGateway:
-    def __init__(self, store: FileSystemAgentGatewayStore, read_path: ResearchMarketReadPath) -> None:
+    def __init__(
+        self,
+        store: FileSystemAgentGatewayStore,
+        read_path: ResearchMarketReader,
+        *,
+        tool_contract: GatewayToolContract = READ_ONLY_GATEWAY_TOOL_CONTRACT,
+    ) -> None:
         self.store = store
         self.read_path = read_path
+        self.tool_contract = tool_contract
 
     def issue_read_only_credential(
         self,
@@ -216,15 +184,18 @@ class AgentMarketGateway:
         token: Optional[str] = None,
         now: Optional[datetime] = None,
     ) -> tuple[AgentGatewayCredential, str]:
-        tools = READ_ONLY_TOOL_NAMES if allowed_tools is None else tuple(sorted(set(allowed_tools)))
-        invalid_tools = sorted(set(tools) - set(READ_ONLY_TOOL_NAMES))
+        tools = self.tool_contract.tool_names if allowed_tools is None else tuple(sorted(set(allowed_tools)))
+        invalid_tools = sorted(set(tools) - set(self.tool_contract.tool_names))
         if invalid_tools:
             raise ValueError(f"unsupported gateway tools: {', '.join(invalid_tools)}")
         if rate_limit_count < 1:
             raise ValueError("rate_limit_count must be positive")
         if rate_limit_window_seconds < 1:
             raise ValueError("rate_limit_window_seconds must be positive")
-        cleaned_subject = self._sanitize_text("subject", subject, max_length=120, allow_spaces=True)
+        try:
+            cleaned_subject = sanitize_gateway_text("subject", subject, max_length=120, allow_spaces=True)
+        except GatewayToolInputError as exc:
+            raise AgentInputError(str(exc)) from exc
         return self.store.issue_credential(
             subject=cleaned_subject,
             allowed_tools=tools,
@@ -259,9 +230,14 @@ class AgentMarketGateway:
             credential = self.store.load_credential(token)
             self._authorize(credential, tool_name)
             self._enforce_rate_limit(credential, called_at)
-            sanitized_arguments = self._sanitize_arguments(tool_name, arguments)
             try:
-                result = self._dispatch(tool_name, sanitized_arguments)
+                sanitized_arguments = self.tool_contract.normalize_arguments(tool_name, arguments)
+            except GatewayToolInputError as exc:
+                raise AgentInputError(str(exc)) from exc
+            except GatewayToolAuthorizationError as exc:
+                raise AgentAuthorizationError(str(exc)) from exc
+            try:
+                result = self.tool_contract.dispatch(self.read_path, tool_name, sanitized_arguments)
             except (FileNotFoundError, KeyError, ValueError) as exc:
                 raise AgentInputError(str(exc)) from exc
             response_payload = {
@@ -292,7 +268,7 @@ class AgentMarketGateway:
             )
 
     def _authorize(self, credential: AgentGatewayCredential, tool_name: str) -> None:
-        if tool_name not in READ_ONLY_TOOL_NAMES:
+        if not self.tool_contract.has_tool(tool_name):
             raise AgentAuthorizationError(f"tool is not exposed by the gateway: {tool_name}")
         if tool_name not in credential.allowed_tools:
             raise AgentAuthorizationError(f"credential is not allowed to call tool: {tool_name}")
@@ -305,234 +281,6 @@ class AgentMarketGateway:
                 f"rate limit exceeded for credential {credential.credential_id}: "
                 f"{credential.rate_limit_count} calls per {credential.rate_limit_window_seconds}s"
             )
-
-    def _dispatch(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        if tool_name == "list_active_markets":
-            return self.read_path.list_active_markets(
-                MarketFilter(
-                    category=arguments.get("category"),
-                    query=arguments.get("query"),
-                    active_only=arguments.get("active_only", True),
-                    limit=arguments.get("limit"),
-                ),
-                dataset_id=arguments.get("dataset_id"),
-            )
-        if tool_name == "get_market_metadata":
-            return self.read_path.get_market_metadata(
-                arguments["market_id"],
-                dataset_id=arguments.get("dataset_id"),
-            )
-        if tool_name == "get_market_timeseries":
-            return self.read_path.get_market_timeseries(
-                arguments["market_id"],
-                start=parse_datetime(arguments.get("start")),
-                end=parse_datetime(arguments.get("end")),
-                fields=arguments.get("fields"),
-            )
-        if tool_name == "get_top_of_book":
-            return self.read_path.get_top_of_book(
-                arguments["token_id"],
-                at=parse_datetime(arguments.get("at")),
-                depth=arguments.get("depth"),
-            )
-        if tool_name == "get_order_book_history":
-            return self.read_path.get_order_book_history(
-                arguments["token_id"],
-                start=parse_datetime(arguments.get("start")),
-                end=parse_datetime(arguments.get("end")),
-                depth=arguments.get("depth"),
-            )
-        if tool_name == "get_trade_history":
-            return self.read_path.get_trade_history(
-                market_id=arguments.get("market_id"),
-                token_id=arguments.get("token_id"),
-                start=parse_datetime(arguments.get("start")),
-                end=parse_datetime(arguments.get("end")),
-                limit=arguments.get("limit"),
-            )
-        if tool_name == "get_book_health":
-            return self.read_path.get_book_health(
-                dataset_id=arguments.get("dataset_id"),
-                stale_after=timedelta(seconds=arguments.get("stale_after_seconds", 300)),
-            )
-        if tool_name == "get_ingest_health":
-            return self.read_path.get_ingest_health(
-                dataset_id=arguments.get("dataset_id"),
-                stale_after=timedelta(seconds=arguments.get("stale_after_seconds", 3600)),
-            ).to_dict()
-        raise AgentAuthorizationError(f"tool is not exposed by the gateway: {tool_name}")
-
-    def _sanitize_arguments(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(arguments, dict):
-            raise AgentInputError("gateway arguments must be a JSON object")
-
-        allowed_fields = {
-            "list_active_markets": {"active_only", "category", "dataset_id", "limit", "query"},
-            "get_market_metadata": {"dataset_id", "market_id"},
-            "get_market_timeseries": {"end", "fields", "market_id", "start"},
-            "get_top_of_book": {"at", "depth", "token_id"},
-            "get_order_book_history": {"depth", "end", "start", "token_id"},
-            "get_trade_history": {"end", "limit", "market_id", "start", "token_id"},
-            "get_book_health": {"dataset_id", "stale_after_seconds"},
-            "get_ingest_health": {"dataset_id", "stale_after_seconds"},
-        }
-        if tool_name not in allowed_fields:
-            raise AgentAuthorizationError(f"tool is not exposed by the gateway: {tool_name}")
-
-        unexpected_fields = sorted(set(arguments) - allowed_fields[tool_name])
-        if unexpected_fields:
-            raise AgentInputError(f"unexpected gateway argument(s): {', '.join(unexpected_fields)}")
-
-        if tool_name == "list_active_markets":
-            payload: dict[str, Any] = {}
-            if "category" in arguments:
-                payload["category"] = self._sanitize_text("category", arguments["category"], max_length=80)
-            if "query" in arguments:
-                payload["query"] = self._sanitize_text("query", arguments["query"], max_length=120, allow_spaces=True)
-            if "dataset_id" in arguments:
-                payload["dataset_id"] = self._sanitize_text("dataset_id", arguments["dataset_id"], max_length=64)
-            if "active_only" in arguments:
-                if not isinstance(arguments["active_only"], bool):
-                    raise AgentInputError("active_only must be a boolean")
-                payload["active_only"] = arguments["active_only"]
-            if "limit" in arguments:
-                payload["limit"] = self._sanitize_int("limit", arguments["limit"], minimum=1, maximum=250)
-            return payload
-
-        if tool_name == "get_market_metadata":
-            payload = {
-                "market_id": self._sanitize_market_id(arguments.get("market_id")),
-            }
-            if "dataset_id" in arguments:
-                payload["dataset_id"] = self._sanitize_text("dataset_id", arguments["dataset_id"], max_length=64)
-            return payload
-
-        if tool_name == "get_market_timeseries":
-            payload = {
-                "market_id": self._sanitize_market_id(arguments.get("market_id")),
-            }
-            if "start" in arguments:
-                payload["start"] = self._sanitize_datetime("start", arguments["start"])
-            if "end" in arguments:
-                payload["end"] = self._sanitize_datetime("end", arguments["end"])
-            if "fields" in arguments:
-                payload["fields"] = self._sanitize_fields(arguments["fields"])
-            return payload
-
-        if tool_name == "get_top_of_book":
-            payload = {
-                "token_id": self._sanitize_token_id(arguments.get("token_id")),
-            }
-            if "at" in arguments:
-                payload["at"] = self._sanitize_datetime("at", arguments["at"])
-            if "depth" in arguments:
-                payload["depth"] = self._sanitize_int("depth", arguments["depth"], minimum=1, maximum=100)
-            return payload
-
-        if tool_name == "get_order_book_history":
-            payload = {
-                "token_id": self._sanitize_token_id(arguments.get("token_id")),
-            }
-            if "start" in arguments:
-                payload["start"] = self._sanitize_datetime("start", arguments["start"])
-            if "end" in arguments:
-                payload["end"] = self._sanitize_datetime("end", arguments["end"])
-            if "depth" in arguments:
-                payload["depth"] = self._sanitize_int("depth", arguments["depth"], minimum=1, maximum=100)
-            return payload
-
-        if tool_name == "get_trade_history":
-            payload = {}
-            if "market_id" in arguments:
-                payload["market_id"] = self._sanitize_market_id(arguments["market_id"])
-            if "token_id" in arguments:
-                payload["token_id"] = self._sanitize_token_id(arguments["token_id"])
-            if "market_id" not in payload and "token_id" not in payload:
-                raise AgentInputError("market_id or token_id is required")
-            if "start" in arguments:
-                payload["start"] = self._sanitize_datetime("start", arguments["start"])
-            if "end" in arguments:
-                payload["end"] = self._sanitize_datetime("end", arguments["end"])
-            if "limit" in arguments:
-                payload["limit"] = self._sanitize_int("limit", arguments["limit"], minimum=1, maximum=1000)
-            return payload
-
-        payload = {}
-        if "dataset_id" in arguments:
-            payload["dataset_id"] = self._sanitize_text("dataset_id", arguments["dataset_id"], max_length=64)
-        if "stale_after_seconds" in arguments:
-            payload["stale_after_seconds"] = self._sanitize_int(
-                "stale_after_seconds",
-                arguments["stale_after_seconds"],
-                minimum=1,
-                maximum=86400,
-            )
-        return payload
-
-    def _sanitize_market_id(self, value: Any) -> str:
-        cleaned = self._sanitize_text("market_id", value, max_length=120)
-        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
-        if any(character not in allowed for character in cleaned):
-            raise AgentInputError("market_id contains unsupported characters")
-        return cleaned
-
-    def _sanitize_token_id(self, value: Any) -> str:
-        cleaned = self._sanitize_text("token_id", value, max_length=160)
-        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
-        if any(character not in allowed for character in cleaned):
-            raise AgentInputError("token_id contains unsupported characters")
-        return cleaned
-
-    def _sanitize_datetime(self, field_name: str, value: Any) -> str:
-        cleaned = self._sanitize_text(field_name, value, max_length=64)
-        parsed = parse_datetime(cleaned)
-        if parsed is None:
-            raise AgentInputError(f"{field_name} must be an ISO-8601 datetime")
-        return format_datetime(parsed) or cleaned
-
-    def _sanitize_fields(self, value: Any) -> list[str]:
-        if not isinstance(value, list):
-            raise AgentInputError("fields must be a list of strings")
-        sanitized: list[str] = []
-        for item in value:
-            field_name = self._sanitize_text("fields", item, max_length=40)
-            if field_name not in _ALLOWED_TIMESERIES_FIELDS:
-                raise AgentInputError(f"unsupported timeseries field: {field_name}")
-            sanitized.append(field_name)
-        return sanitized
-
-    def _sanitize_int(self, field_name: str, value: Any, *, minimum: int, maximum: int) -> int:
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise AgentInputError(f"{field_name} must be an integer")
-        if value < minimum or value > maximum:
-            raise AgentInputError(f"{field_name} must be between {minimum} and {maximum}")
-        return value
-
-    def _sanitize_text(
-        self,
-        field_name: str,
-        value: Any,
-        *,
-        max_length: int,
-        allow_spaces: bool = False,
-    ) -> str:
-        if not isinstance(value, str):
-            raise AgentInputError(f"{field_name} must be a string")
-        cleaned = value.strip()
-        if not cleaned:
-            raise AgentInputError(f"{field_name} must not be empty")
-        if len(cleaned) > max_length:
-            raise AgentInputError(f"{field_name} exceeds max length {max_length}")
-        if any(ord(character) < 32 for character in cleaned):
-            raise AgentInputError(f"{field_name} contains control characters")
-        lowered = cleaned.lower()
-        if cleaned.startswith("/") or cleaned.startswith("~/"):
-            raise AgentInputError(f"{field_name} looks like a filesystem path")
-        if any(snippet in lowered for snippet in _FORBIDDEN_ARGUMENT_SNIPPETS):
-            raise AgentInputError(f"{field_name} contains forbidden content")
-        if not allow_spaces and " " in cleaned:
-            raise AgentInputError(f"{field_name} must not contain spaces")
-        return cleaned
 
     def _audit(
         self,
@@ -554,7 +302,7 @@ class AgentMarketGateway:
                 "session_id": session_id,
                 "status": "ok" if response_payload.get("ok") else response_payload["error"]["code"],
                 "subject": None if credential is None else credential.subject,
-                "tool_name": tool_name,
+                "tool_name": self.tool_contract.audit_name(tool_name),
                 "user_id": user_id,
             }
         )

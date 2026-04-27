@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal, getcontext
 import hashlib
 from pathlib import Path
 from typing import Any, Optional
@@ -11,12 +10,10 @@ from .experiments import ExperimentService
 from .ingest import FileSystemMarketStore
 from .models import format_datetime, utc_now
 from .persistence import canonical_copy, canonical_json, read_json, write_json
-from .strategy_replay import HistoryPoint, StrategyReplayService
-
-getcontext().prec = 28
+from .strategy_replay import BacktestReplayRequest, STRATEGY_REPLAY_SIMULATION_LEVELS, StrategyReplayService
 
 BACKTEST_RUN_STATUSES = ("SUCCEEDED", "FAILED")
-BACKTEST_SIMULATION_LEVELS = ("price_replay", "top_of_book", "full_order_book")
+BACKTEST_SIMULATION_LEVELS = STRATEGY_REPLAY_SIMULATION_LEVELS
 BACKTEST_ENGINE_VERSION = 1
 
 
@@ -27,25 +24,6 @@ def _require_text(name: str, value: Any, *, max_length: int = 2000) -> str:
     if len(normalized) > max_length:
         raise BacktestValidationError(f"{name} exceeds max length {max_length}", code="invalid_request")
     return normalized
-
-
-def _decimal_from_value(name: str, value: Any, *, minimum: Optional[Decimal] = None) -> Decimal:
-    try:
-        decimal_value = Decimal(str(value))
-    except Exception as exc:  # pragma: no cover - Decimal raises multiple exception types.
-        raise BacktestValidationError(f"{name} must be numeric", code="invalid_assumptions") from exc
-    if minimum is not None and decimal_value < minimum:
-        raise BacktestValidationError(
-            f"{name} must be >= {minimum}",
-            code="invalid_assumptions",
-            violations=[{"field": name, "issue": "below_minimum", "minimum": str(minimum)}],
-        )
-    return decimal_value
-
-
-def _format_decimal(value: Decimal, *, places: str = "0.00000001") -> str:
-    quantized = value.quantize(Decimal(places))
-    return format(quantized.normalize(), "f")
 
 
 def _replay_validation_error(
@@ -150,28 +128,25 @@ class BacktestService:
 
         created_at = format_datetime(now or utc_now()) or ""
         try:
-            normalized_assumptions = self._normalize_assumptions(raw_assumptions)
-            loaded_histories = self.replay.load_backtest_histories(
-                experiment,
-                manifest.dataset_id,
-                validation_error=_replay_validation_error,
+            replay_artifacts = self.replay.run_replay(
+                BacktestReplayRequest(
+                    run_id=run_id,
+                    created_at=created_at,
+                    experiment=experiment,
+                    manifest=manifest.to_dict(),
+                    assumptions=raw_assumptions,
+                    engine_version=BACKTEST_ENGINE_VERSION,
+                    validation_error=_replay_validation_error,
+                )
             )
-            artifact = self._simulate(
-                run_id=run_id,
-                created_at=created_at,
-                experiment=experiment,
-                manifest=manifest.to_dict(),
-                assumptions=normalized_assumptions,
-                histories=loaded_histories.histories,
-                timeline_points=loaded_histories.timeline_points,
-                history_sha256=loaded_histories.history_sha256,
-            )
+            normalized_assumptions = replay_artifacts.assumptions
+            artifact = replay_artifacts.artifact
             run_status = "SUCCEEDED"
             failure_code = None
             failure_message = None
             self._promote_experiment_to_backtested(experiment_id=experiment["experiment_id"], run_id=run_id, now=now)
         except BacktestValidationError as exc:
-            normalized_assumptions = self._best_effort_assumptions(raw_assumptions)
+            normalized_assumptions = self.replay.best_effort_assumptions(raw_assumptions)
             artifact = self._failed_artifact(
                 run_id=run_id,
                 created_at=created_at,
@@ -233,9 +208,6 @@ class BacktestService:
             "violations": failure["violations"],
         }
 
-    def _best_effort_assumptions(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return canonical_copy(payload) if isinstance(payload, dict) else {"raw": payload}
-
     def _resolve_dataset_id(self, experiment: dict[str, Any], dataset_id: Optional[str]) -> str:
         immutable_dataset_id = _require_text("dataset_id", experiment["dataset_id"], max_length=200)
         if dataset_id is None:
@@ -247,136 +219,6 @@ class BacktestService:
                 code="immutable_dataset_mismatch",
             )
         return requested
-
-    def _normalize_assumptions(self, assumptions: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(assumptions, dict):
-            raise BacktestValidationError(
-                "assumptions must be a JSON object",
-                code="invalid_assumptions",
-                violations=[{"field": "assumptions", "issue": "not_object"}],
-            )
-
-        simulation_level = _require_text(
-            "assumptions.simulation_level",
-            assumptions.get("simulation_level"),
-            max_length=40,
-        )
-        if simulation_level not in BACKTEST_SIMULATION_LEVELS:
-            raise BacktestValidationError(
-                f"unsupported simulation_level: {simulation_level}",
-                code="invalid_assumptions",
-                violations=[{"field": "simulation_level", "issue": "unsupported_value"}],
-            )
-
-        split_method = _require_text("assumptions.split_method", assumptions.get("split_method"), max_length=40)
-        if split_method != "chronological":
-            raise BacktestValidationError(
-                "split_method must be chronological",
-                code="non_deterministic_split",
-                violations=[{"field": "split_method", "issue": "must_be_chronological"}],
-            )
-
-        normalized = {
-            "simulation_level": simulation_level,
-            "fee_model_version": _require_text("assumptions.fee_model_version", assumptions.get("fee_model_version")),
-            "latency_model_version": _require_text(
-                "assumptions.latency_model_version",
-                assumptions.get("latency_model_version"),
-            ),
-            "slippage_model_version": _require_text(
-                "assumptions.slippage_model_version",
-                assumptions.get("slippage_model_version"),
-            ),
-            "fill_model_version": _require_text("assumptions.fill_model_version", assumptions.get("fill_model_version")),
-            "tick_size": str(_decimal_from_value("assumptions.tick_size", assumptions.get("tick_size"), minimum=Decimal("0.00000001"))),
-            "price_precision_dp": int(_decimal_from_value("assumptions.price_precision_dp", assumptions.get("price_precision_dp"), minimum=Decimal("0"))),
-            "quantity_precision_dp": int(_decimal_from_value("assumptions.quantity_precision_dp", assumptions.get("quantity_precision_dp"), minimum=Decimal("0"))),
-            "stale_book_threshold_seconds": int(
-                _decimal_from_value(
-                    "assumptions.stale_book_threshold_seconds",
-                    assumptions.get("stale_book_threshold_seconds"),
-                    minimum=Decimal("1"),
-                )
-            ),
-            "fee_bps": str(_decimal_from_value("assumptions.fee_bps", assumptions.get("fee_bps"), minimum=Decimal("0"))),
-            "slippage_bps": str(
-                _decimal_from_value("assumptions.slippage_bps", assumptions.get("slippage_bps"), minimum=Decimal("0"))
-            ),
-            "latency_seconds": int(
-                _decimal_from_value("assumptions.latency_seconds", assumptions.get("latency_seconds"), minimum=Decimal("0"))
-            ),
-            "partial_fill_ratio": str(
-                _decimal_from_value("assumptions.partial_fill_ratio", assumptions.get("partial_fill_ratio"), minimum=Decimal("0"))
-            ),
-            "split_method": split_method,
-            "train_ratio": str(_decimal_from_value("assumptions.train_ratio", assumptions.get("train_ratio"), minimum=Decimal("0"))),
-            "validation_ratio": str(
-                _decimal_from_value("assumptions.validation_ratio", assumptions.get("validation_ratio"), minimum=Decimal("0"))
-            ),
-            "test_ratio": str(_decimal_from_value("assumptions.test_ratio", assumptions.get("test_ratio"), minimum=Decimal("0"))),
-            "baseline": _require_text("assumptions.baseline", assumptions.get("baseline"), max_length=120),
-        }
-
-        partial_fill_ratio = Decimal(normalized["partial_fill_ratio"])
-        if partial_fill_ratio <= 0 or partial_fill_ratio > 1:
-            raise BacktestValidationError(
-                "partial_fill_ratio must be > 0 and <= 1",
-                code="invalid_assumptions",
-                violations=[{"field": "partial_fill_ratio", "issue": "outside_range"}],
-            )
-
-        ratio_sum = Decimal(normalized["train_ratio"]) + Decimal(normalized["validation_ratio"]) + Decimal(normalized["test_ratio"])
-        if ratio_sum != Decimal("1"):
-            raise BacktestValidationError(
-                "train_ratio + validation_ratio + test_ratio must equal 1",
-                code="invalid_assumptions",
-                violations=[{"field": "split_ratio_sum", "issue": "must_equal_1"}],
-            )
-
-        return normalized
-
-    def _simulate(
-        self,
-        *,
-        run_id: str,
-        created_at: str,
-        experiment: dict[str, Any],
-        manifest: dict[str, Any],
-        assumptions: dict[str, Any],
-        histories: dict[str, list[HistoryPoint]],
-        timeline_points: int,
-        history_sha256: str,
-    ) -> dict[str, Any]:
-        replay_result = self.replay.replay_strategy(
-            experiment,
-            assumptions,
-            histories,
-            validation_error=_replay_validation_error,
-        )
-        metrics = self._summarize_metrics(replay_result.trades, replay_result.rejections, assumptions)
-        return {
-            "run_id": run_id,
-            "status": "SUCCEEDED",
-            "created_at": created_at,
-            "experiment_id": experiment["experiment_id"],
-            "dataset_id": manifest["dataset_id"],
-            "strategy_family": experiment["strategy_family"],
-            "simulation_level": assumptions["simulation_level"],
-            "input_fingerprints": {
-                "dataset_id": manifest["dataset_id"],
-                "dataset_sha256": manifest["raw_payload_sha256"],
-                "history_sha256": history_sha256,
-                "config_sha256": experiment["config_sha256"],
-                "code_version": experiment["code_version"],
-                "engine_version": BACKTEST_ENGINE_VERSION,
-                "assumptions_sha256": hashlib.sha256(canonical_json(assumptions).encode("utf-8")).hexdigest(),
-            },
-            "assumptions": canonical_copy(assumptions),
-            "timeline_points": timeline_points,
-            "metrics": metrics,
-            "trades": replay_result.trades,
-            "rejections": replay_result.rejections,
-        }
 
     def _failed_artifact(
         self,
@@ -405,38 +247,6 @@ class BacktestService:
             },
             "trades": [],
             "rejections": [],
-        }
-
-    def _summarize_metrics(
-        self,
-        trades: list[dict[str, Any]],
-        rejections: list[dict[str, Any]],
-        assumptions: dict[str, Any],
-    ) -> dict[str, Any]:
-        gross_pnl = sum(Decimal(item["gross_pnl_usd"]) for item in trades) if trades else Decimal("0")
-        net_pnl = sum(Decimal(item["net_pnl_usd"]) for item in trades) if trades else Decimal("0")
-        fees = sum(Decimal(item["fees_usd"]) for item in trades) if trades else Decimal("0")
-        slippage = sum(Decimal(item["slippage_usd"]) for item in trades) if trades else Decimal("0")
-        notional = sum(Decimal(item["filled_notional_usd"]) for item in trades) if trades else Decimal("0")
-        split_metrics: dict[str, dict[str, Any]] = {}
-        for split_name in ("train", "validation", "test"):
-            split_trades = [item for item in trades if item["split"] == split_name]
-            split_metrics[split_name] = {
-                "trade_count": len(split_trades),
-                "net_pnl_usd": _format_decimal(sum(Decimal(item["net_pnl_usd"]) for item in split_trades) if split_trades else Decimal("0")),
-            }
-
-        return {
-            "trade_count": len(trades),
-            "rejection_count": len(rejections),
-            "stale_rejection_count": sum(1 for item in rejections if "stale" in item["reason"]),
-            "gross_pnl_usd": _format_decimal(gross_pnl),
-            "net_pnl_usd": _format_decimal(net_pnl),
-            "fees_usd": _format_decimal(fees),
-            "slippage_usd": _format_decimal(slippage),
-            "filled_notional_usd": _format_decimal(notional),
-            "baseline": assumptions["baseline"],
-            "splits": split_metrics,
         }
 
     def _promote_experiment_to_backtested(

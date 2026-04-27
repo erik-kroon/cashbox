@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .base import CLIContext, parse_json_argument, register_command
+from ..audit import AuditTrailServiceError
 from ..execution import ExecutionServiceError
 from ..experiments import ExperimentLifecycleError, ExperimentNotFoundError
 from ..governance import (
@@ -267,20 +268,20 @@ def _get_policy_version(context: CLIContext, args: object) -> int:
 
 def _get_audit_console(context: CLIContext, args: object) -> int:
     try:
-        result = context.governance.list_audit_events(
+        result = context.audit.list_audit_events(
             service=args.service,
             actor=args.actor,
             status=args.status,
             limit=args.limit,
         )
-    except GovernanceServiceError as exc:
+    except AuditTrailServiceError as exc:
         context.fail(str(exc))
     return context.emit(result)
 
 
 def _get_audit_timeline(context: CLIContext, args: object) -> int:
     try:
-        result = context.governance.get_audit_timeline(
+        result = context.audit.get_audit_timeline(
             experiment_id=args.experiment_id,
             market_id=args.market_id,
             intent_id=args.intent_id,
@@ -289,7 +290,7 @@ def _get_audit_timeline(context: CLIContext, args: object) -> int:
             request_id=args.request_id,
             limit=args.limit,
         )
-    except GovernanceServiceError as exc:
+    except AuditTrailServiceError as exc:
         context.fail(str(exc))
     return context.emit(result)
 
