@@ -1,10 +1,10 @@
 # Cashbox
 
-Cashbox is a governed prediction-market research and execution platform.
+Cashbox is a governed research and execution control plane for prediction-market strategies.
 
-The goal is not to let an LLM trade directly. The goal is to let an LLM generate, inspect, and manage research workflows while deterministic infrastructure preserves data integrity, validates strategy quality, enforces risk policy, and keeps signing and live execution outside the research trust boundary.
+It is built for a workflow where an AI research agent can inspect market data, create experiments, run simulations, and request live-adjacent actions, while deterministic software enforces the parts that should not be left to an agent: data provenance, backtest reproducibility, promotion gates, risk policy, audit trails, execution controls, and human approval.
 
-Core principle:
+Cashbox is not a trading bot with credentials attached to a prompt. The core design is:
 
 ```text
 Agent proposes.
@@ -17,92 +17,80 @@ Signer executes only approved orders.
 Human governs capital.
 ```
 
-## What Cashbox Is Becoming
+## Status
 
-Cashbox is intended to be a production-grade operating system for autonomous prediction-market research with a controlled live-trading boundary.
+This repository is an early, local, filesystem-backed implementation of the Cashbox control plane. It is useful for development, architecture validation, and local operator demos. It is not production trading infrastructure.
 
-Target capabilities:
+Implemented today:
 
-- continuous ingest of market metadata, books, trades, wallet activity, and resolution data
-- immutable raw and normalized datasets with point-in-time reproducibility
-- strategy research workflows driven by an LLM through a constrained tool API
-- deterministic backtesting with fees, slippage, latency, stale-book rejection, and partial fills
-- paper trading and drift analysis before any live capital is touched
-- risk-gated trade intents, isolated signing, and auditable execution
-- full observability for data health, research decisions, promotions, and live actions
+- Polymarket-style market ingest with raw payload preservation, normalized snapshots, manifests, and append-only market history.
+- Market history reads for metadata, token mapping, CLOB books, trades, top-of-book, book health, and ingest health.
+- A constrained agent gateway with scoped credentials, tool authorization, input sanitization, rate limits, and audit logging.
+- Experiment registry with immutable strategy configs, lifecycle history, cloning, and research notes.
+- Deterministic backtests over point-in-time data with fees, latency, slippage, stale-book rejection, precision constraints, partial fills, artifacts, and failure explanations.
+- Evaluator gates for paper, tiny-live, and scaled-live readiness.
+- Paper-trading replay with persisted state and paper-vs-backtest drift reports.
+- Trade intents, risk decisions, human review, approval tokens, live-submission stubs, halt controls, fill tracking, and reconciliation snapshots.
+- Governance workflows for RBAC, approval requests, policy versioning, emergency halt, shared audit timelines, and operator evidence.
 
-Cashbox is explicitly not:
+Planned production infrastructure such as Postgres, ClickHouse, Redpanda/Kafka, Temporal, Vault, Kubernetes, OPA, and a real isolated signer remains future work.
 
-- an unconstrained trading bot
-- a prompt connected directly to exchange credentials
-- a system where backtests or model reasoning are treated as proof
-- a path for an agent to bypass policy, risk, or human capital governance
+## Why Cashbox Exists
+
+AI agents are useful for research exploration, but prediction-market execution needs stronger guarantees than natural-language reasoning can provide. Cashbox separates research authority from execution authority.
+
+An agent can:
+
+- Read sanctioned market data.
+- Create and clone experiments.
+- Attach research notes.
+- Run approved backtests and paper workflows.
+- Submit structured trade intents for review.
+- Request halts through governed commands.
+
+An agent cannot:
+
+- Access private keys, exchange credentials, wallets, or production secrets.
+- Submit live orders directly.
+- Change risk limits or governance policy by itself.
+- Bypass deterministic evaluator, risk, execution, or human approval gates.
+- Treat a backtest or model explanation as sufficient proof for capital allocation.
 
 ## Architecture
 
-Cashbox is designed around separate trust zones:
+The code is organized around trust zones and deep local modules.
 
-- `research`: LLM-driven hypothesis generation, report writing, and experiment orchestration
-- `data`: append-first ingestion, normalized market data, features, and quality monitoring
-- `research compute`: deterministic backtests, walk-forward runs, and simulation workloads
-- `execution`: risk gateway, paper execution, live order state, and reconciliation
-- `signer`: isolated signing service with no direct agent access
+```text
+Research agent
+     |
+     v
+Agent gateway  ->  sanctioned read tools + audit
+     |
+     v
+Market history ->  raw payloads, normalized records, books, trades
+     |
+     v
+Experiments -> backtests -> evaluator -> paper replay
+     |
+     v
+Risk gateway -> governance -> execution controls -> reconciliation
+     |
+     v
+Operator evidence + health + audit timeline
+```
 
-At the product boundary, Hermes or another research agent interacts with Cashbox through a capability-gated tool API. The agent can read sanctioned datasets, create experiments, run approved research jobs, and request live-adjacent actions such as trade intents. It cannot submit orders directly, read secrets, edit risk policy, or access execution hosts.
+The current runtime is grouped into four composition modules:
 
-## System Shape
+- `market_research`: market storage, research read path, and agent gateway.
+- `experiment_replay`: experiments, backtests, evaluator, and paper replay.
+- `execution_governance`: risk gateway, execution state, and governance policy.
+- `operator_evidence`: audit trail, operator evidence, and system health.
 
-Planned production components:
+These groups keep dependency wiring local and make it easier to move individual implementations behind durable production adapters later.
 
-- `market-data-ingestor`: preserves raw payloads and emits normalized market events
-- `market-catalog`: maintains canonical market metadata and relation mappings
-- `feature-builder`: computes point-in-time feature datasets
-- `experiment-service`: stores immutable hypotheses, configs, and run lineage
-- `backtest-runner`: executes reproducible simulations
-- `walk-forward-runner`: validates robustness across regimes
-- `evaluator`: promotes or rejects strategies deterministically
-- `paper-executor`: measures live behavior without capital risk
-- `risk-gateway`: enforces live-trading policy and invariants
-- `signer-service`: signs only approved payloads
-- `live-executor`: interfaces with the exchange adapter
-- `governance-service`: handles approvals, RBAC, and policy lifecycle
-- `audit-trail-service`: reconstructs cross-module audit consoles and timelines
-- `operator-evidence-service`: aggregates operator-facing audit, policy, execution, reconciliation, experiment, backtest, and paper evidence
+## Installation
 
-## Current Status
-
-This repository is early and currently implements the first three local vertical slices:
-
-- append-first ingest of Polymarket Gamma market payloads
-- immutable dataset manifests and normalized market snapshots
-- append-only per-market history for point-in-time reads
-- a market history module for metadata, token mapping, CLOB books, trades, and data-health semantics
-- research read APIs for active markets, metadata, timeseries, and ingest health
-- a local agent gateway for approved read-only market tools with audit logging
-- an experiment registry with immutable definitions, append-only lifecycle history, and research notes
-- a deterministic backtest runner with immutable assumptions, persisted artifacts, and failure explanations
-
-That slice exists to support the first two derived user outcomes:
-
-- a researcher can discover active markets and inspect sanitized, reproducible market data
-- an operator can answer basic data-health and read-path questions from stored artifacts
-
-Everything beyond that remains planned work.
-
-The repository now also includes:
-
-- a scoped agent gateway that exposes only approved read-only market tools
-- credential issuance with per-tool authorization and fixed-window rate limits
-- input sanitization and append-only audit logs for each gateway call
-- a filesystem-backed experiment service for templates, validation, creation, cloning, and lifecycle tracking
-- a filesystem-backed backtest service that replays point-in-time market history and models fees, latency, slippage, staleness, and partial fills deterministically
-- a filesystem-backed paper-trading service that replays post-backtest history, measures fill drift, and persists paper run state
-- a filesystem-backed trade-intent and risk-gateway service with deterministic live checks, auditable decisions, and explicit human approval/rejection records
-- a filesystem-backed live execution service with cancel-all controls, global halt state, fill tracking, and reconciliation snapshots
-
-## Local Usage
-
-Create a virtualenv and install the package:
+Cashbox requires Python 3.11 or newer.
 
 ```bash
 python3 -m venv .venv
@@ -110,19 +98,29 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Ingest a local file of Polymarket-style market payloads:
+Run the test suite:
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests
+```
+
+By default, local data is written under `.cashbox/`.
+
+## Quick Start
+
+Ingest example market data:
 
 ```bash
 cashbox ingest-file examples/gamma-markets.json
 ```
 
-Fetch directly from Polymarket Gamma and persist a dataset:
+Or fetch directly from Polymarket Gamma:
 
 ```bash
 cashbox ingest-polymarket --limit 100 --active true
 ```
 
-Read the research-facing market data:
+Read market data through the research-facing interface:
 
 ```bash
 cashbox list-active-markets --category politics
@@ -131,7 +129,7 @@ cashbox get-market-timeseries election-2028 --field question --field volume
 cashbox get-ingest-health --stale-after-seconds 1800
 ```
 
-Issue a local read-only gateway credential and call a tool through the gateway:
+Issue a local read-only gateway credential and call an agent tool:
 
 ```bash
 cashbox issue-agent-credential --subject hermes
@@ -142,9 +140,9 @@ cashbox gateway-call list_active_markets \
   --args-json '{"query":"btc","limit":1}'
 ```
 
-By default, local data is stored under `.cashbox/market-data/`.
+## Experiment Workflow
 
-Create and inspect immutable experiments:
+Create and inspect an immutable experiment:
 
 ```bash
 cashbox list-strategy-families
@@ -158,11 +156,10 @@ cashbox create-experiment \
   --generated-by hermes
 cashbox transition-experiment-status <experiment-id> --status VALIDATED_CONFIG --changed-by evaluator
 cashbox attach-research-note <experiment-id> --author hermes --markdown "Spread widened after CPI headlines."
-cashbox list-experiments --status VALIDATED_CONFIG
 cashbox get-experiment <experiment-id>
 ```
 
-Run a deterministic backtest and inspect its artifacts:
+Run a deterministic backtest:
 
 ```bash
 cashbox run-backtest <experiment-id> \
@@ -171,7 +168,7 @@ cashbox get-backtest-artifacts <run-id>
 cashbox explain-backtest-failure <run-id>
 ```
 
-Score an experiment and evaluate the paper-promotion gate:
+Score the experiment and check whether it can move to paper:
 
 ```bash
 cashbox score-experiment <experiment-id>
@@ -179,7 +176,7 @@ cashbox check-promotion-eligibility <experiment-id> --target-stage paper
 cashbox check-promotion-eligibility <experiment-id> --target-stage paper --promote-if-eligible
 ```
 
-Start a paper run, inspect drift, and finalize the paper stage:
+Start paper replay and inspect drift:
 
 ```bash
 cashbox start-paper-strategy <experiment-id> --run-id <run-id>
@@ -189,7 +186,9 @@ cashbox analyze-paper-vs-backtest-drift <experiment-id>
 cashbox stop-paper-strategy <experiment-id>
 ```
 
-Create a live-adjacent trade intent and evaluate the HITL risk path:
+## Live-Adjacent Controls
+
+Cashbox models live execution as a governed path. A strategy submits a trade intent, risk evaluates it, a human can approve or reject it, and only an approved intent can be submitted to the execution module.
 
 ```bash
 cashbox create-trade-intent <experiment-id> \
@@ -197,48 +196,72 @@ cashbox create-trade-intent <experiment-id> \
   --order-json '{"market_id":"btc-150k","outcome":"Yes","side":"BUY","order_class":"TAKER_IOC","time_in_force":"IOC","price":"0.52","quantity":"20","estimated_fee_bps":"10","estimated_slippage_bps":"8"}'
 cashbox evaluate-trade-intent <intent-id>
 cashbox review-trade-intent <intent-id> --reviewer ops-oncall --decision approve --reason "approved for tiny-live"
-cashbox evaluate-trade-intent <intent-id>
 cashbox submit-approved-order <intent-id> --approval-token <approval-token>
 cashbox get-execution-state <intent-id>
-cashbox get-execution-record <execution-id>
 cashbox record-live-fill <execution-id> --filled-quantity 5 --fill-price 0.52
 cashbox request-strategy-cancel-all <experiment-id> --reason "operator requested stop"
 cashbox request-global-halt --reason "hard halt after venue anomaly"
 cashbox get-live-controls
+```
+
+Reconcile local execution state against venue state:
+
+```bash
 cashbox reconcile-live-state \
   --venue-orders-json '[{"order_id":"ord-123","status":"SUBMITTED"}]' \
   --venue-positions-json '[{"market_id":"btc-150k","outcome":"Yes","net_quantity":"5"}]'
+```
+
+## Operator And Governance Commands
+
+Operators can inspect system health, audit timelines, governance requests, policy versions, and live controls without reading raw files by hand.
+
+Common commands:
+
+```bash
+cashbox get-system-health
+cashbox list-audit-events
+cashbox get-audit-timeline
+cashbox request-policy-change --help
+cashbox request-emergency-halt --help
 cashbox get-risk-decision <decision-id>
 ```
 
 ## Repository Layout
 
-- `docs/roadmap.md`: near-term implementation roadmap and capability gates
-- `docs/NEXT-THREADS.md`: active worker-ready implementation queue
-- `docs/prd.md`: target product and architecture definition
-- `src/cashbox/backtests.py`: deterministic backtest execution, artifacts, and failure explanations
-- `src/cashbox/evaluator.py`: experiment scoring and deterministic paper-promotion gates
-- `src/cashbox/paper.py`: paper-trading runs, state transitions, and backtest drift analysis
-- `src/cashbox/risk.py`: trade intents, risk evaluation, human review, and approval tokens
-- `src/cashbox/execution.py`: signer-service release, live-executor submission, cancel-all, halt controls, fill tracking, and reconciliation
-- `src/cashbox/operator_evidence.py`: operator-facing evidence aggregation for health, incidents, and dashboards
-- `src/cashbox/market_history.py`: raw/normalized market history, token mapping, CLOB books, trades, and health
-- `src/cashbox/ingest.py`: compatibility ingest facade
-- `src/cashbox/research.py`: deterministic research read facade
-- `src/cashbox/experiments.py`: experiment registry, immutable configs, and lifecycle tracking
-- `src/cashbox/models.py`: normalized market and dataset models
-- `src/cashbox/cli.py`: local ingest and read CLI
-- `tests/test_backtests.py`: deterministic backtest coverage
-- `tests/test_paper.py`: paper-trading and drift-report coverage
-- `tests/test_market_data.py`: first-slice coverage
-- `tests/test_experiments.py`: experiment registry coverage
+- `src/cashbox/market_history.py`: raw and normalized market history, token mapping, CLOB books, trades, and data-health reads.
+- `src/cashbox/research.py`: sanctioned research read interface over market history.
+- `src/cashbox/gateway.py`: local agent gateway runtime.
+- `src/cashbox/gateway_contract.py`: gateway tool definitions, argument rules, dispatch metadata, and audit naming.
+- `src/cashbox/experiments.py`: experiment registry, strategy templates, immutable configs, and lifecycle tracking.
+- `src/cashbox/strategy_replay.py`: shared replay engine for backtest and paper simulations.
+- `src/cashbox/backtests.py`: backtest orchestration, artifacts, and failure explanations.
+- `src/cashbox/evaluator.py`: deterministic promotion gates.
+- `src/cashbox/paper.py`: paper-trading runs, state transitions, and drift analysis.
+- `src/cashbox/risk.py`: trade intents, risk evaluation, human review, and approval tokens.
+- `src/cashbox/execution.py`: live-submission stubs, halt controls, fills, and reconciliation.
+- `src/cashbox/governance.py`: RBAC, approval requests, policy lifecycle, and emergency halt workflows.
+- `src/cashbox/audit.py`: audit listing and timeline reconstruction.
+- `src/cashbox/operator_evidence.py`: operator-facing evidence aggregation.
+- `src/cashbox/health.py`: system health summaries.
+- `src/cashbox/runtime.py`: grouped runtime composition.
+- `src/cashbox/commands/`: CLI command handlers.
+- `docs/prd.md`: production product and architecture definition.
+- `docs/roadmap.md`: implementation roadmap.
+- `docs/NEXT-THREADS.md`: active follow-up work queue.
 
-## Near-Term Roadmap
+## Roadmap
 
-The next slices after this one are now tracked in `docs/roadmap.md`.
+The near-term roadmap is to keep the live boundary narrow while making the local system more realistic and observable.
 
-1. richer observability for signer, executor, ingest, governance, and platform health regressions
-2. deeper market-data coverage for CLOB books, trades, token mapping, and point-in-time research reads
-3. walk-forward and sensitivity analysis so promotion gates depend on robustness, not one backtest
+1. Improve health and audit evidence for signer, executor, ingest, governance, and platform regressions.
+2. Expand market-data coverage for CLOB books, trades, token mapping, and point-in-time research reads.
+3. Add walk-forward and sensitivity analysis so promotion depends on robustness, not one backtest.
+4. Extract storage ports and conformance tests before introducing database-backed implementations.
+5. Add production adapters only after the trust model remains unchanged under local tests.
 
-The repository should keep moving in that order so the live boundary stays narrow, auditable, and easy to reason about.
+See `docs/roadmap.md` for the detailed plan.
+
+## Safety Notice
+
+Cashbox is experimental software. It is not financial advice, not a profitability claim, and not a complete production trading system. Do not connect it to real capital, private keys, or exchange credentials without adding the missing production controls described in the roadmap and PRD.
