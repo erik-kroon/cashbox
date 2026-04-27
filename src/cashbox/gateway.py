@@ -12,9 +12,13 @@ from .persistence import append_jsonl, canonical_json, read_json, read_jsonl, wr
 from .research import ResearchMarketReadPath
 
 READ_ONLY_TOOL_NAMES = (
+    "get_book_health",
     "get_ingest_health",
     "get_market_metadata",
     "get_market_timeseries",
+    "get_order_book_history",
+    "get_top_of_book",
+    "get_trade_history",
     "list_active_markets",
 )
 
@@ -325,6 +329,32 @@ class AgentMarketGateway:
                 end=parse_datetime(arguments.get("end")),
                 fields=arguments.get("fields"),
             )
+        if tool_name == "get_top_of_book":
+            return self.read_path.get_top_of_book(
+                arguments["token_id"],
+                at=parse_datetime(arguments.get("at")),
+                depth=arguments.get("depth"),
+            )
+        if tool_name == "get_order_book_history":
+            return self.read_path.get_order_book_history(
+                arguments["token_id"],
+                start=parse_datetime(arguments.get("start")),
+                end=parse_datetime(arguments.get("end")),
+                depth=arguments.get("depth"),
+            )
+        if tool_name == "get_trade_history":
+            return self.read_path.get_trade_history(
+                market_id=arguments.get("market_id"),
+                token_id=arguments.get("token_id"),
+                start=parse_datetime(arguments.get("start")),
+                end=parse_datetime(arguments.get("end")),
+                limit=arguments.get("limit"),
+            )
+        if tool_name == "get_book_health":
+            return self.read_path.get_book_health(
+                dataset_id=arguments.get("dataset_id"),
+                stale_after=timedelta(seconds=arguments.get("stale_after_seconds", 300)),
+            )
         if tool_name == "get_ingest_health":
             return self.read_path.get_ingest_health(
                 dataset_id=arguments.get("dataset_id"),
@@ -340,6 +370,10 @@ class AgentMarketGateway:
             "list_active_markets": {"active_only", "category", "dataset_id", "limit", "query"},
             "get_market_metadata": {"dataset_id", "market_id"},
             "get_market_timeseries": {"end", "fields", "market_id", "start"},
+            "get_top_of_book": {"at", "depth", "token_id"},
+            "get_order_book_history": {"depth", "end", "start", "token_id"},
+            "get_trade_history": {"end", "limit", "market_id", "start", "token_id"},
+            "get_book_health": {"dataset_id", "stale_after_seconds"},
             "get_ingest_health": {"dataset_id", "stale_after_seconds"},
         }
         if tool_name not in allowed_fields:
@@ -385,6 +419,44 @@ class AgentMarketGateway:
                 payload["fields"] = self._sanitize_fields(arguments["fields"])
             return payload
 
+        if tool_name == "get_top_of_book":
+            payload = {
+                "token_id": self._sanitize_token_id(arguments.get("token_id")),
+            }
+            if "at" in arguments:
+                payload["at"] = self._sanitize_datetime("at", arguments["at"])
+            if "depth" in arguments:
+                payload["depth"] = self._sanitize_int("depth", arguments["depth"], minimum=1, maximum=100)
+            return payload
+
+        if tool_name == "get_order_book_history":
+            payload = {
+                "token_id": self._sanitize_token_id(arguments.get("token_id")),
+            }
+            if "start" in arguments:
+                payload["start"] = self._sanitize_datetime("start", arguments["start"])
+            if "end" in arguments:
+                payload["end"] = self._sanitize_datetime("end", arguments["end"])
+            if "depth" in arguments:
+                payload["depth"] = self._sanitize_int("depth", arguments["depth"], minimum=1, maximum=100)
+            return payload
+
+        if tool_name == "get_trade_history":
+            payload = {}
+            if "market_id" in arguments:
+                payload["market_id"] = self._sanitize_market_id(arguments["market_id"])
+            if "token_id" in arguments:
+                payload["token_id"] = self._sanitize_token_id(arguments["token_id"])
+            if "market_id" not in payload and "token_id" not in payload:
+                raise AgentInputError("market_id or token_id is required")
+            if "start" in arguments:
+                payload["start"] = self._sanitize_datetime("start", arguments["start"])
+            if "end" in arguments:
+                payload["end"] = self._sanitize_datetime("end", arguments["end"])
+            if "limit" in arguments:
+                payload["limit"] = self._sanitize_int("limit", arguments["limit"], minimum=1, maximum=1000)
+            return payload
+
         payload = {}
         if "dataset_id" in arguments:
             payload["dataset_id"] = self._sanitize_text("dataset_id", arguments["dataset_id"], max_length=64)
@@ -402,6 +474,13 @@ class AgentMarketGateway:
         allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
         if any(character not in allowed for character in cleaned):
             raise AgentInputError("market_id contains unsupported characters")
+        return cleaned
+
+    def _sanitize_token_id(self, value: Any) -> str:
+        cleaned = self._sanitize_text("token_id", value, max_length=160)
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
+        if any(character not in allowed for character in cleaned):
+            raise AgentInputError("token_id contains unsupported characters")
         return cleaned
 
     def _sanitize_datetime(self, field_name: str, value: Any) -> str:

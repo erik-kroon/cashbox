@@ -60,6 +60,30 @@ class AgentGatewayTests(unittest.TestCase):
             ],
             received_at=datetime(2026, 4, 24, 10, 0, tzinfo=timezone.utc),
         )
+        self.market_store.ingest_order_book_snapshots(
+            [
+                {
+                    "token_id": "btc-150k-yes",
+                    "timestamp": "2026-04-24T10:04:00Z",
+                    "bids": [["0.42", "100"]],
+                    "asks": [["0.45", "70"]],
+                }
+            ],
+            received_at=datetime(2026, 4, 24, 10, 4, tzinfo=timezone.utc),
+        )
+        self.market_store.ingest_clob_trades(
+            [
+                {
+                    "id": "trade-001",
+                    "token_id": "btc-150k-yes",
+                    "timestamp": "2026-04-24T10:04:30Z",
+                    "price": "0.44",
+                    "size": "12",
+                    "side": "BUY",
+                }
+            ],
+            received_at=datetime(2026, 4, 24, 10, 5, tzinfo=timezone.utc),
+        )
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -84,6 +108,29 @@ class AgentGatewayTests(unittest.TestCase):
         self.assertEqual(audit_rows[0]["tool_name"], "list_active_markets")
         self.assertEqual(audit_rows[0]["status"], "ok")
         self.assertEqual(audit_rows[0]["subject"], "hermes")
+
+    def test_gateway_exposes_clob_read_tools(self) -> None:
+        self.gateway.issue_read_only_credential(subject="hermes", token="test-token")
+
+        top = self.gateway.call_tool(
+            "get_top_of_book",
+            {"token_id": "btc-150k-yes", "at": "2026-04-24T10:05:00Z"},
+            token="test-token",
+            user_id="hermes",
+            session_id="session-001",
+            now=datetime(2026, 4, 24, 10, 5, tzinfo=timezone.utc),
+        )
+        trades = self.gateway.call_tool(
+            "get_trade_history",
+            {"market_id": "btc-150k", "start": "2026-04-24T10:00:00Z", "end": "2026-04-24T10:10:00Z"},
+            token="test-token",
+            user_id="hermes",
+            session_id="session-001",
+            now=datetime(2026, 4, 24, 10, 5, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(top["result"]["best_bid"]["price"], "0.42")
+        self.assertEqual([trade["trade_id"] for trade in trades["result"]], ["trade-001"])
 
     def test_gateway_rejects_unscoped_tools(self) -> None:
         self.gateway.issue_read_only_credential(

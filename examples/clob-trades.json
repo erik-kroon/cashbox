@@ -1,0 +1,26 @@
+[
+  {
+    "id": "trade-001",
+    "token_id": "election-2028-yes",
+    "timestamp": "2026-04-24T10:00:30Z",
+    "price": "0.50",
+    "size": "25",
+    "side": "BUY"
+  },
+  {
+    "id": "trade-002",
+    "token_id": "election-2028-no",
+    "timestamp": "2026-04-24T10:04:00Z",
+    "price": "0.48",
+    "size": "10",
+    "side": "SELL"
+  },
+  {
+    "id": "trade-003",
+    "token_id": "btc-150k-yes",
+    "timestamp": "2026-04-24T10:05:30Z",
+    "price": "0.44",
+    "size": "12",
+    "side": "BUY"
+  }
+]

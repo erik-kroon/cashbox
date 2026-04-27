@@ -33,6 +33,13 @@ class CashboxWorkspaceTests(unittest.TestCase):
         self.assertIs(workspace.risk.read_path, workspace.read_path)
         self.assertIs(workspace.execution.risk, workspace.risk)
         self.assertIs(workspace.gateway.read_path, workspace.read_path)
+        self.assertIs(workspace.health.read_path, workspace.read_path)
+        self.assertIs(workspace.health.gateway, workspace.gateway)
+        self.assertIs(workspace.health.experiments, workspace.experiments)
+        self.assertIs(workspace.health.backtests, workspace.backtests)
+        self.assertIs(workspace.health.paper, workspace.paper)
+        self.assertIs(workspace.health.execution, workspace.execution)
+        self.assertIs(workspace.health.governance, workspace.governance)
 
     def test_cli_context_uses_single_workspace_runtime(self) -> None:
         context = build_context(root=self.root, parser=argparse.ArgumentParser())
@@ -47,6 +54,7 @@ class CashboxWorkspaceTests(unittest.TestCase):
         self.assertIs(context.workspace.risk, context.risk)
         self.assertIs(context.workspace.execution, context.execution)
         self.assertIs(context.workspace.gateway, context.gateway)
+        self.assertIs(context.workspace.health, context.health)
 
 
 if __name__ == "__main__":

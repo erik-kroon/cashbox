@@ -9,6 +9,7 @@ from .execution import ExecutionService, FileSystemExecutionStore
 from .experiments import ExperimentService, FileSystemExperimentStore
 from .gateway import AgentMarketGateway, FileSystemAgentGatewayStore
 from .governance import FileSystemGovernanceStore, GovernanceService
+from .health import SystemHealthService
 from .ingest import FileSystemMarketStore
 from .paper import FileSystemPaperStore, PaperService
 from .research import ResearchMarketReadPath
@@ -28,6 +29,7 @@ class CashboxWorkspace:
     execution: ExecutionService
     governance: GovernanceService
     gateway: AgentMarketGateway
+    health: SystemHealthService
 
 
 def build_workspace(root: Path) -> CashboxWorkspace:
@@ -65,6 +67,15 @@ def build_workspace(root: Path) -> CashboxWorkspace:
         risk=risk,
     )
     gateway = AgentMarketGateway(FileSystemAgentGatewayStore(root_path), read_path)
+    health = SystemHealthService(
+        read_path=read_path,
+        gateway=gateway,
+        experiments=experiments,
+        backtests=backtests,
+        paper=paper,
+        execution=execution,
+        governance=governance,
+    )
     return CashboxWorkspace(
         root=root_path,
         market_store=market_store,
@@ -77,4 +88,5 @@ def build_workspace(root: Path) -> CashboxWorkspace:
         execution=execution,
         governance=governance,
         gateway=gateway,
+        health=health,
     )

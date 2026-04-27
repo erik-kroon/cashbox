@@ -210,6 +210,8 @@ cashbox get-risk-decision <decision-id>
 
 ## Repository Layout
 
+- `docs/roadmap.md`: near-term implementation roadmap and capability gates
+- `docs/NEXT-THREADS.md`: active worker-ready implementation queue
 - `docs/prd.md`: target product and architecture definition
 - `src/cashbox/backtests.py`: deterministic backtest execution, artifacts, and failure explanations
 - `src/cashbox/evaluator.py`: experiment scoring and deterministic paper-promotion gates
@@ -228,9 +230,10 @@ cashbox get-risk-decision <decision-id>
 
 ## Near-Term Roadmap
 
-The next slices after this one are:
+The next slices after this one are now tracked in `docs/roadmap.md`.
 
-1. governance approvals, RBAC, and policy lifecycle controls
-2. richer observability for signer, executor, and platform health regressions
+1. richer observability for signer, executor, ingest, governance, and platform health regressions
+2. deeper market-data coverage for CLOB books, trades, token mapping, and point-in-time research reads
+3. walk-forward and sensitivity analysis so promotion gates depend on robustness, not one backtest
 
 The repository should keep moving in that order so the live boundary stays narrow, auditable, and easy to reason about.
