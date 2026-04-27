@@ -319,6 +319,131 @@ class GovernanceServiceTests(unittest.TestCase):
         self.assertIn("risk", services)
         self.assertIn("execution", services)
 
+    def test_audit_timeline_expands_execution_to_risk_and_experiment_context(self) -> None:
+        intent, decision = self._create_approved_intent()
+        execution = self.workspace.execution.submit_approved_order(
+            intent["intent_id"],
+            approval_token=decision["approval_token"],
+            now=datetime(2026, 4, 24, 10, 2, 30, tzinfo=timezone.utc),
+        )
+
+        timeline = self.governance.get_audit_timeline(execution_id=execution["execution_id"])
+        event_types = [event["event_type"] for event in timeline["events"]]
+
+        self.assertEqual(timeline["missing_filters"], {})
+        self.assertIn("experiment_status_changed", event_types)
+        self.assertIn("trade_intent_created", event_types)
+        self.assertIn("trade_intent_reviewed", event_types)
+        self.assertIn("risk_decision", event_types)
+        self.assertIn("execution_submitted", event_types)
+        self.assertIn("submit_approved_order", event_types)
+        self.assertEqual(timeline["resolved_references"]["execution_id"], [execution["execution_id"]])
+        self.assertEqual(timeline["resolved_references"]["intent_id"], [intent["intent_id"]])
+        self.assertEqual(timeline["resolved_references"]["decision_id"], [decision["decision_id"]])
+
+    def test_audit_timeline_traces_rejected_intent_from_experiment_to_risk_checks_and_review(self) -> None:
+        live_experiment_id = self._create_live_ready_experiment(
+            hypothesis="Rejected intent should remain explainable."
+        )
+        intent = self.workspace.risk.create_trade_intent(
+            live_experiment_id,
+            {
+                "market_id": "election-2028",
+                "outcome": "Yes",
+                "side": "buy",
+                "order_class": "taker_ioc",
+                "time_in_force": "ioc",
+                "price": "0.51",
+                "quantity": "10",
+                "estimated_fee_bps": "10",
+                "estimated_slippage_bps": "8",
+            },
+            submitted_by="hermes",
+            rationale="Rejected timeline coverage",
+            now=datetime(2026, 4, 24, 10, 1, tzinfo=timezone.utc),
+        )
+        review = self.workspace.risk.review_trade_intent(
+            intent["intent_id"],
+            reviewer="ops-oncall",
+            decision="reject",
+            reason="Manual review rejected this intent.",
+            now=datetime(2026, 4, 24, 10, 1, 30, tzinfo=timezone.utc),
+        )
+        decision = self.workspace.risk.evaluate_trade_intent(
+            intent["intent_id"],
+            now=datetime(2026, 4, 24, 10, 2, tzinfo=timezone.utc),
+        )
+
+        timeline = self.governance.get_audit_timeline(intent_id=intent["intent_id"])
+        event_types = [event["event_type"] for event in timeline["events"]]
+        risk_decision_events = [
+            event for event in timeline["events"] if event["event_type"] == "risk_decision"
+        ]
+        review_events = [
+            event for event in timeline["events"] if event["event_type"] == "trade_intent_reviewed"
+        ]
+
+        self.assertEqual(timeline["missing_filters"], {})
+        self.assertIn("experiment_status_changed", event_types)
+        self.assertIn("trade_intent_created", event_types)
+        self.assertIn("trade_intent_reviewed", event_types)
+        self.assertIn("risk_decision", event_types)
+        self.assertEqual(timeline["resolved_references"]["experiment_id"], [live_experiment_id])
+        self.assertEqual(timeline["resolved_references"]["intent_id"], [intent["intent_id"]])
+        self.assertEqual(timeline["resolved_references"]["decision_id"], [decision["decision_id"]])
+        self.assertEqual(review_events[0]["payload"]["review_id"], review["review_id"])
+        self.assertEqual(review_events[0]["payload"]["decision"], "REJECT")
+        self.assertEqual(risk_decision_events[0]["status"], "REJECT")
+        self.assertIn("human_approval", risk_decision_events[0]["payload"]["checks"])
+        self.assertIn("human_approval", risk_decision_events[0]["payload"]["failed_checks"])
+
+    def test_audit_timeline_filters_governance_request(self) -> None:
+        self.governance.bootstrap_subject(
+            "governor-alice",
+            roles=["governor"],
+            now=datetime(2026, 4, 24, 10, 0, tzinfo=timezone.utc),
+        )
+        self.governance.assign_role(
+            "ops-bob",
+            role="operator",
+            granted_by="governor-alice",
+            now=datetime(2026, 4, 24, 10, 0, 30, tzinfo=timezone.utc),
+        )
+        request = self.governance.request_strategy_promotion(
+            self.experiment_id,
+            requested_by="ops-bob",
+            reason="Tiny-live run completed and operator requests production approval.",
+            now=datetime(2026, 4, 24, 10, 2, tzinfo=timezone.utc),
+        )
+        self.governance.review_request(
+            request["request_id"],
+            reviewer="governor-alice",
+            decision="approve",
+            reason="Evidence is satisfactory.",
+            now=datetime(2026, 4, 24, 10, 3, tzinfo=timezone.utc),
+        )
+
+        timeline = self.governance.get_audit_timeline(request_id=request["request_id"])
+        event_types = [event["event_type"] for event in timeline["events"]]
+
+        self.assertIn("governance_request_created", event_types)
+        self.assertIn("governance_request_reviewed", event_types)
+        self.assertEqual(timeline["resolved_references"]["request_id"], [request["request_id"]])
+        self.assertEqual(timeline["resolved_references"]["experiment_id"], [self.experiment_id])
+
+    def test_audit_timeline_missing_filter_does_not_hide_other_matches(self) -> None:
+        intent, _decision = self._create_approved_intent()
+
+        timeline = self.governance.get_audit_timeline(
+            intent_id=intent["intent_id"],
+            execution_id="exec-does-not-exist",
+        )
+        event_types = [event["event_type"] for event in timeline["events"]]
+
+        self.assertEqual(timeline["missing_filters"], {"execution_id": "exec-does-not-exist"})
+        self.assertIn("trade_intent_created", event_types)
+        self.assertIn("trade_intent_reviewed", event_types)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -124,6 +124,20 @@ def register(subparsers: object) -> None:
     audit_console.add_argument("--status")
     audit_console.add_argument("--limit", type=int)
 
+    audit_timeline = register_command(
+        subparsers,
+        name="get-audit-timeline",
+        help_text="Build a chronological domain timeline filtered by experiment, market, intent, decision, execution, or request id.",
+        handler=_get_audit_timeline,
+    )
+    audit_timeline.add_argument("--experiment-id")
+    audit_timeline.add_argument("--market-id")
+    audit_timeline.add_argument("--intent-id")
+    audit_timeline.add_argument("--decision-id")
+    audit_timeline.add_argument("--execution-id")
+    audit_timeline.add_argument("--request-id")
+    audit_timeline.add_argument("--limit", type=int)
+
     emergency_halt = register_command(
         subparsers,
         name="request-emergency-halt",
@@ -257,6 +271,22 @@ def _get_audit_console(context: CLIContext, args: object) -> int:
             service=args.service,
             actor=args.actor,
             status=args.status,
+            limit=args.limit,
+        )
+    except GovernanceServiceError as exc:
+        context.fail(str(exc))
+    return context.emit(result)
+
+
+def _get_audit_timeline(context: CLIContext, args: object) -> int:
+    try:
+        result = context.governance.get_audit_timeline(
+            experiment_id=args.experiment_id,
+            market_id=args.market_id,
+            intent_id=args.intent_id,
+            decision_id=args.decision_id,
+            execution_id=args.execution_id,
+            request_id=args.request_id,
             limit=args.limit,
         )
     except GovernanceServiceError as exc:

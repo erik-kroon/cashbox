@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from . import backtests, evaluation, execution, experiments, gateway, governance, ingest, paper, research, risk
+from . import backtests, evaluation, execution, experiments, gateway, governance, health, ingest, paper, research, risk
 
 COMMAND_FAMILIES = (
     ingest.register,
@@ -13,6 +13,7 @@ COMMAND_FAMILIES = (
     execution.register,
     governance.register,
     gateway.register,
+    health.register,
 )
 
 
