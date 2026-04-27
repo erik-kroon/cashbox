@@ -99,6 +99,7 @@ class GovernanceServiceTests(unittest.TestCase):
             execution=self.workspace.execution,
             risk=self.workspace.risk,
         )
+        self.audit = self.workspace.audit
         experiment = self.workspace.experiments.create_experiment(
             hypothesis="Promote only after governance approval.",
             strategy_family="midpoint_reversion",
@@ -311,7 +312,7 @@ class GovernanceServiceTests(unittest.TestCase):
             now=datetime(2026, 4, 24, 10, 3, tzinfo=timezone.utc),
         )
 
-        audit = self.governance.list_audit_events(limit=20)
+        audit = self.audit.list_audit_events(limit=20)
         services = {event["service"] for event in audit["events"]}
 
         self.assertIn("governance", services)
@@ -327,7 +328,7 @@ class GovernanceServiceTests(unittest.TestCase):
             now=datetime(2026, 4, 24, 10, 2, 30, tzinfo=timezone.utc),
         )
 
-        timeline = self.governance.get_audit_timeline(execution_id=execution["execution_id"])
+        timeline = self.audit.get_audit_timeline(execution_id=execution["execution_id"])
         event_types = [event["event_type"] for event in timeline["events"]]
 
         self.assertEqual(timeline["missing_filters"], {})
@@ -374,7 +375,7 @@ class GovernanceServiceTests(unittest.TestCase):
             now=datetime(2026, 4, 24, 10, 2, tzinfo=timezone.utc),
         )
 
-        timeline = self.governance.get_audit_timeline(intent_id=intent["intent_id"])
+        timeline = self.audit.get_audit_timeline(intent_id=intent["intent_id"])
         event_types = [event["event_type"] for event in timeline["events"]]
         risk_decision_events = [
             event for event in timeline["events"] if event["event_type"] == "risk_decision"
@@ -423,7 +424,7 @@ class GovernanceServiceTests(unittest.TestCase):
             now=datetime(2026, 4, 24, 10, 3, tzinfo=timezone.utc),
         )
 
-        timeline = self.governance.get_audit_timeline(request_id=request["request_id"])
+        timeline = self.audit.get_audit_timeline(request_id=request["request_id"])
         event_types = [event["event_type"] for event in timeline["events"]]
 
         self.assertIn("governance_request_created", event_types)
@@ -434,7 +435,7 @@ class GovernanceServiceTests(unittest.TestCase):
     def test_audit_timeline_missing_filter_does_not_hide_other_matches(self) -> None:
         intent, _decision = self._create_approved_intent()
 
-        timeline = self.governance.get_audit_timeline(
+        timeline = self.audit.get_audit_timeline(
             intent_id=intent["intent_id"],
             execution_id="exec-does-not-exist",
         )

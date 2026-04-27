@@ -1,26 +1,52 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_DOWN
 import hashlib
 import json
 from math import ceil
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
-from .ingest import FileSystemMarketStore
-from .models import NormalizedMarketRecord, format_datetime, parse_datetime
+from .market_history import FileSystemMarketHistory
+from .models import NormalizedMarketRecord, format_datetime, parse_datetime, utc_now
+
+STRATEGY_REPLAY_SIMULATION_LEVELS = ("price_replay", "top_of_book", "full_order_book")
+STRATEGY_REPLAY_SPLITS = ("train", "validation", "test")
+STRATEGY_REPLAY_PAPER_SPLIT = "paper"
 
 
 def _canonical_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-def _require_text(name: str, value: Any) -> str:
+def _require_text(name: str, value: Any, *, max_length: int = 2000) -> str:
     normalized = str(value).strip()
     if not normalized:
         raise ValueError(f"{name} must be non-empty")
+    if len(normalized) > max_length:
+        raise ValueError(f"{name} exceeds max length {max_length}")
     return normalized
+
+
+def _decimal_from_value(
+    name: str,
+    value: Any,
+    *,
+    minimum: Optional[Decimal] = None,
+    validation_error: Callable[..., Exception],
+) -> Decimal:
+    try:
+        decimal_value = Decimal(str(value))
+    except Exception as exc:  # pragma: no cover - Decimal raises multiple exception types.
+        raise validation_error(f"{name} must be numeric", code="invalid_assumptions") from exc
+    if minimum is not None and decimal_value < minimum:
+        raise validation_error(
+            f"{name} must be >= {minimum}",
+            code="invalid_assumptions",
+            violations=[{"field": name, "issue": "below_minimum", "minimum": str(minimum)}],
+        )
+    return decimal_value
 
 
 def _quantize_down(value: Decimal, step: Decimal) -> Decimal:
@@ -84,11 +110,332 @@ class LoadedHistoryWindow:
 class StrategyReplayResult:
     trades: list[dict[str, Any]]
     rejections: list[dict[str, Any]]
+    metrics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PaperReplayResult:
+    candidate_trades: list[dict[str, Any]]
+    trades: list[dict[str, Any]]
+    rejections: list[dict[str, Any]]
+    metrics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BacktestReplayRequest:
+    run_id: str
+    created_at: str
+    experiment: dict[str, Any]
+    manifest: dict[str, Any]
+    assumptions: dict[str, Any]
+    engine_version: int
+    validation_error: Callable[..., Exception]
+
+
+@dataclass(frozen=True)
+class BacktestReplayArtifacts:
+    artifact: dict[str, Any]
+    assumptions: dict[str, Any]
+    history_sha256: str
+    timeline_points: int
+
+
+@dataclass(frozen=True)
+class PaperReplayRequest:
+    created_at: str
+    experiment: dict[str, Any]
+    backtest_run: dict[str, Any]
+    start_dataset_id: str
+    end_dataset_id: str
+    latest_dataset_id: str
+    engine_version: int
+    paper_run_id_factory: Callable[[str], str]
+    validation_error: Callable[..., Exception]
+
+
+@dataclass(frozen=True)
+class PaperReplayArtifacts:
+    paper_run_id: str
+    artifact: dict[str, Any]
+    drift_report: dict[str, Any]
+    metrics: dict[str, Any]
+    history_sha256: str
+    timeline_points: int
+    source_window: dict[str, Any]
+
+
+StrategyReplayRequest = Union[BacktestReplayRequest, PaperReplayRequest]
+StrategyReplayArtifacts = Union[BacktestReplayArtifacts, PaperReplayArtifacts]
 
 
 class StrategyReplayService:
-    def __init__(self, market_store: FileSystemMarketStore) -> None:
-        self.market_store = market_store
+    def __init__(self, market_history: FileSystemMarketHistory) -> None:
+        self.market_history = market_history
+
+    @property
+    def market_store(self) -> FileSystemMarketHistory:
+        return self.market_history
+
+    def run_replay(self, request: StrategyReplayRequest) -> StrategyReplayArtifacts:
+        if isinstance(request, BacktestReplayRequest):
+            return self._run_backtest_replay(request)
+        if isinstance(request, PaperReplayRequest):
+            return self._run_paper_replay(request)
+        raise TypeError(f"unsupported replay request: {type(request).__name__}")
+
+    def _run_backtest_replay(self, request: BacktestReplayRequest) -> BacktestReplayArtifacts:
+        assumptions = self.normalize_assumptions(
+            request.assumptions,
+            validation_error=request.validation_error,
+        )
+        loaded_histories = self.load_backtest_histories(
+            request.experiment,
+            request.manifest["dataset_id"],
+            validation_error=request.validation_error,
+        )
+        artifact = self.build_backtest_artifact(
+            run_id=request.run_id,
+            created_at=request.created_at,
+            experiment=request.experiment,
+            manifest=request.manifest,
+            assumptions=assumptions,
+            histories=loaded_histories.histories,
+            timeline_points=loaded_histories.timeline_points,
+            history_sha256=loaded_histories.history_sha256,
+            engine_version=request.engine_version,
+            validation_error=request.validation_error,
+        )
+        return BacktestReplayArtifacts(
+            artifact=artifact,
+            assumptions=assumptions,
+            history_sha256=loaded_histories.history_sha256,
+            timeline_points=loaded_histories.timeline_points,
+        )
+
+    def _run_paper_replay(self, request: PaperReplayRequest) -> PaperReplayArtifacts:
+        loaded_histories = self.load_paper_histories(
+            request.experiment,
+            start_dataset_id=request.start_dataset_id,
+            end_dataset_id=request.end_dataset_id,
+            validation_error=request.validation_error,
+        )
+        paper_run_id = request.paper_run_id_factory(loaded_histories.history_sha256)
+        paper_replay = self.replay_paper_strategy(
+            request.experiment,
+            assumptions=request.backtest_run["artifact"]["assumptions"],
+            histories=loaded_histories.histories,
+            validation_error=request.validation_error,
+        )
+        drift_report = self.build_paper_drift_report(
+            experiment_id=request.experiment["experiment_id"],
+            paper_run_id=paper_run_id,
+            backtest_run_id=request.backtest_run["run_id"],
+            reference_assumptions=request.backtest_run["artifact"]["assumptions"],
+            reference_metrics=request.backtest_run["artifact"]["metrics"],
+            paper_metrics=paper_replay.metrics,
+            paper_rejections=paper_replay.rejections,
+            report_version=request.engine_version,
+        )
+        artifact = self.build_paper_artifact(
+            paper_run_id=paper_run_id,
+            created_at=request.created_at,
+            experiment=request.experiment,
+            backtest_run=request.backtest_run,
+            source_window=loaded_histories.source_window,
+            timeline_points=loaded_histories.timeline_points,
+            history_sha256=loaded_histories.history_sha256,
+            latest_dataset_id=request.latest_dataset_id,
+            engine_version=request.engine_version,
+            paper_replay=paper_replay,
+            drift_report_id=drift_report["report_id"],
+        )
+        return PaperReplayArtifacts(
+            paper_run_id=paper_run_id,
+            artifact=artifact,
+            drift_report=drift_report,
+            metrics=paper_replay.metrics,
+            history_sha256=loaded_histories.history_sha256,
+            timeline_points=loaded_histories.timeline_points,
+            source_window=loaded_histories.source_window,
+        )
+
+    def normalize_assumptions(
+        self,
+        assumptions: dict[str, Any],
+        *,
+        validation_error: Callable[..., Exception],
+    ) -> dict[str, Any]:
+        if not isinstance(assumptions, dict):
+            raise validation_error(
+                "assumptions must be a JSON object",
+                code="invalid_assumptions",
+                violations=[{"field": "assumptions", "issue": "not_object"}],
+            )
+
+        try:
+            simulation_level = _require_text(
+                "assumptions.simulation_level",
+                assumptions.get("simulation_level"),
+                max_length=40,
+            )
+            split_method = _require_text(
+                "assumptions.split_method",
+                assumptions.get("split_method"),
+                max_length=40,
+            )
+            normalized = {
+                "simulation_level": simulation_level,
+                "fee_model_version": _require_text(
+                    "assumptions.fee_model_version",
+                    assumptions.get("fee_model_version"),
+                ),
+                "latency_model_version": _require_text(
+                    "assumptions.latency_model_version",
+                    assumptions.get("latency_model_version"),
+                ),
+                "slippage_model_version": _require_text(
+                    "assumptions.slippage_model_version",
+                    assumptions.get("slippage_model_version"),
+                ),
+                "fill_model_version": _require_text(
+                    "assumptions.fill_model_version",
+                    assumptions.get("fill_model_version"),
+                ),
+                "tick_size": str(
+                    _decimal_from_value(
+                        "assumptions.tick_size",
+                        assumptions.get("tick_size"),
+                        minimum=Decimal("0.00000001"),
+                        validation_error=validation_error,
+                    )
+                ),
+                "price_precision_dp": int(
+                    _decimal_from_value(
+                        "assumptions.price_precision_dp",
+                        assumptions.get("price_precision_dp"),
+                        minimum=Decimal("0"),
+                        validation_error=validation_error,
+                    )
+                ),
+                "quantity_precision_dp": int(
+                    _decimal_from_value(
+                        "assumptions.quantity_precision_dp",
+                        assumptions.get("quantity_precision_dp"),
+                        minimum=Decimal("0"),
+                        validation_error=validation_error,
+                    )
+                ),
+                "stale_book_threshold_seconds": int(
+                    _decimal_from_value(
+                        "assumptions.stale_book_threshold_seconds",
+                        assumptions.get("stale_book_threshold_seconds"),
+                        minimum=Decimal("1"),
+                        validation_error=validation_error,
+                    )
+                ),
+                "fee_bps": str(
+                    _decimal_from_value(
+                        "assumptions.fee_bps",
+                        assumptions.get("fee_bps"),
+                        minimum=Decimal("0"),
+                        validation_error=validation_error,
+                    )
+                ),
+                "slippage_bps": str(
+                    _decimal_from_value(
+                        "assumptions.slippage_bps",
+                        assumptions.get("slippage_bps"),
+                        minimum=Decimal("0"),
+                        validation_error=validation_error,
+                    )
+                ),
+                "latency_seconds": int(
+                    _decimal_from_value(
+                        "assumptions.latency_seconds",
+                        assumptions.get("latency_seconds"),
+                        minimum=Decimal("0"),
+                        validation_error=validation_error,
+                    )
+                ),
+                "partial_fill_ratio": str(
+                    _decimal_from_value(
+                        "assumptions.partial_fill_ratio",
+                        assumptions.get("partial_fill_ratio"),
+                        minimum=Decimal("0"),
+                        validation_error=validation_error,
+                    )
+                ),
+                "split_method": split_method,
+                "train_ratio": str(
+                    _decimal_from_value(
+                        "assumptions.train_ratio",
+                        assumptions.get("train_ratio"),
+                        minimum=Decimal("0"),
+                        validation_error=validation_error,
+                    )
+                ),
+                "validation_ratio": str(
+                    _decimal_from_value(
+                        "assumptions.validation_ratio",
+                        assumptions.get("validation_ratio"),
+                        minimum=Decimal("0"),
+                        validation_error=validation_error,
+                    )
+                ),
+                "test_ratio": str(
+                    _decimal_from_value(
+                        "assumptions.test_ratio",
+                        assumptions.get("test_ratio"),
+                        minimum=Decimal("0"),
+                        validation_error=validation_error,
+                    )
+                ),
+                "baseline": _require_text(
+                    "assumptions.baseline",
+                    assumptions.get("baseline"),
+                    max_length=120,
+                ),
+            }
+        except ValueError as exc:
+            raise validation_error(str(exc), code="invalid_assumptions") from exc
+
+        if simulation_level not in STRATEGY_REPLAY_SIMULATION_LEVELS:
+            raise validation_error(
+                f"unsupported simulation_level: {simulation_level}",
+                code="invalid_assumptions",
+                violations=[{"field": "simulation_level", "issue": "unsupported_value"}],
+            )
+        if split_method != "chronological":
+            raise validation_error(
+                "split_method must be chronological",
+                code="non_deterministic_split",
+                violations=[{"field": "split_method", "issue": "must_be_chronological"}],
+            )
+
+        partial_fill_ratio = Decimal(normalized["partial_fill_ratio"])
+        if partial_fill_ratio <= 0 or partial_fill_ratio > 1:
+            raise validation_error(
+                "partial_fill_ratio must be > 0 and <= 1",
+                code="invalid_assumptions",
+                violations=[{"field": "partial_fill_ratio", "issue": "outside_range"}],
+            )
+
+        ratio_sum = (
+            Decimal(normalized["train_ratio"])
+            + Decimal(normalized["validation_ratio"])
+            + Decimal(normalized["test_ratio"])
+        )
+        if ratio_sum != Decimal("1"):
+            raise validation_error(
+                "train_ratio + validation_ratio + test_ratio must equal 1",
+                code="invalid_assumptions",
+                violations=[{"field": "split_ratio_sum", "issue": "must_equal_1"}],
+            )
+
+        return normalized
+
+    def best_effort_assumptions(self, payload: Any) -> dict[str, Any]:
+        return json.loads(_canonical_json(payload)) if isinstance(payload, dict) else {"raw": payload}
 
     def load_backtest_histories(
         self,
@@ -97,7 +444,7 @@ class StrategyReplayService:
         *,
         validation_error: Callable[..., Exception],
     ) -> LoadedHistoryBatch:
-        dataset_manifest = self.market_store.load_manifest(dataset_id)
+        dataset_manifest = self.market_history.load_manifest(dataset_id)
         dataset_time = parse_datetime(dataset_manifest.ingested_at)
         if dataset_time is None:
             raise validation_error(
@@ -122,8 +469,8 @@ class StrategyReplayService:
         end_dataset_id: str,
         validation_error: Callable[..., Exception],
     ) -> LoadedHistoryWindow:
-        start_manifest = self.market_store.load_manifest(start_dataset_id)
-        end_manifest = self.market_store.load_manifest(end_dataset_id)
+        start_manifest = self.market_history.load_manifest(start_dataset_id)
+        end_manifest = self.market_history.load_manifest(end_dataset_id)
         start_time = parse_datetime(start_manifest.ingested_at)
         end_time = parse_datetime(end_manifest.ingested_at)
         if start_time is None or end_time is None:
@@ -159,6 +506,7 @@ class StrategyReplayService:
         histories: dict[str, list[HistoryPoint]],
         *,
         split_name_fn: Optional[Callable[[int, int], str]] = None,
+        split_names: tuple[str, ...] = STRATEGY_REPLAY_SPLITS,
         validation_error: Callable[..., Exception],
     ) -> StrategyReplayResult:
         resolved_split_name_fn = split_name_fn or (lambda index, total: _split_name(index, total, assumptions))
@@ -192,7 +540,418 @@ class StrategyReplayService:
                 code="unsupported_strategy_family",
             )
 
-        return StrategyReplayResult(trades=trades, rejections=rejections)
+        metrics = self.summarize_strategy_metrics(
+            trades,
+            rejections,
+            assumptions,
+            split_names=split_names,
+        )
+        return StrategyReplayResult(trades=trades, rejections=rejections, metrics=metrics)
+
+    def replay_paper_strategy(
+        self,
+        experiment: dict[str, Any],
+        assumptions: dict[str, Any],
+        histories: dict[str, list[HistoryPoint]],
+        *,
+        validation_error: Callable[..., Exception],
+    ) -> PaperReplayResult:
+        candidate_result = self.replay_strategy(
+            experiment,
+            assumptions,
+            histories,
+            split_name_fn=lambda _index, _total: STRATEGY_REPLAY_PAPER_SPLIT,
+            split_names=(STRATEGY_REPLAY_PAPER_SPLIT,),
+            validation_error=validation_error,
+        )
+        observed_trades, missed_fills = self.observe_paper_trades(candidate_result.trades, assumptions)
+        rejections = candidate_result.rejections + missed_fills
+        metrics = self.summarize_paper_metrics(
+            candidate_trades=candidate_result.trades,
+            trades=observed_trades,
+            rejections=rejections,
+        )
+        return PaperReplayResult(
+            candidate_trades=candidate_result.trades,
+            trades=observed_trades,
+            rejections=rejections,
+            metrics=metrics,
+        )
+
+    def build_backtest_artifact(
+        self,
+        *,
+        run_id: str,
+        created_at: str,
+        experiment: dict[str, Any],
+        manifest: dict[str, Any],
+        assumptions: dict[str, Any],
+        histories: dict[str, list[HistoryPoint]],
+        timeline_points: int,
+        history_sha256: str,
+        engine_version: int,
+        validation_error: Callable[..., Exception],
+    ) -> dict[str, Any]:
+        replay_result = self.replay_strategy(
+            experiment,
+            assumptions,
+            histories,
+            validation_error=validation_error,
+        )
+        return {
+            "run_id": run_id,
+            "status": "SUCCEEDED",
+            "created_at": created_at,
+            "experiment_id": experiment["experiment_id"],
+            "dataset_id": manifest["dataset_id"],
+            "strategy_family": experiment["strategy_family"],
+            "simulation_level": assumptions["simulation_level"],
+            "input_fingerprints": {
+                "dataset_id": manifest["dataset_id"],
+                "dataset_sha256": manifest["raw_payload_sha256"],
+                "history_sha256": history_sha256,
+                "config_sha256": experiment["config_sha256"],
+                "code_version": experiment["code_version"],
+                "engine_version": engine_version,
+                "assumptions_sha256": hashlib.sha256(_canonical_json(assumptions).encode("utf-8")).hexdigest(),
+            },
+            "assumptions": json.loads(_canonical_json(assumptions)),
+            "timeline_points": timeline_points,
+            "metrics": replay_result.metrics,
+            "trades": replay_result.trades,
+            "rejections": replay_result.rejections,
+        }
+
+    def build_paper_artifact(
+        self,
+        *,
+        paper_run_id: str,
+        created_at: str,
+        experiment: dict[str, Any],
+        backtest_run: dict[str, Any],
+        source_window: dict[str, Any],
+        timeline_points: int,
+        history_sha256: str,
+        latest_dataset_id: str,
+        engine_version: int,
+        paper_replay: PaperReplayResult,
+        drift_report_id: str,
+    ) -> dict[str, Any]:
+        return {
+            "paper_run_id": paper_run_id,
+            "status": "RUNNING",
+            "created_at": created_at,
+            "experiment_id": experiment["experiment_id"],
+            "backtest_run_id": backtest_run["run_id"],
+            "source_window": source_window,
+            "timeline_points": timeline_points,
+            "input_fingerprints": {
+                "backtest_run_id": backtest_run["run_id"],
+                "backtest_artifact_sha256": backtest_run["artifact_sha256"],
+                "backtest_assumptions_sha256": backtest_run["assumptions_sha256"],
+                "config_sha256": experiment["config_sha256"],
+                "history_sha256": history_sha256,
+                "latest_dataset_id": latest_dataset_id,
+                "engine_version": engine_version,
+            },
+            "reference_backtest_metrics": {
+                "trade_count": backtest_run["artifact"]["metrics"]["trade_count"],
+                "rejection_count": backtest_run["artifact"]["metrics"]["rejection_count"],
+                "net_pnl_usd": backtest_run["artifact"]["metrics"]["net_pnl_usd"],
+            },
+            "metrics": paper_replay.metrics,
+            "trades": paper_replay.trades,
+            "rejections": paper_replay.rejections,
+            "drift_report_id": drift_report_id,
+        }
+
+    def summarize_strategy_metrics(
+        self,
+        trades: list[dict[str, Any]],
+        rejections: list[dict[str, Any]],
+        assumptions: dict[str, Any],
+        *,
+        split_names: tuple[str, ...] = STRATEGY_REPLAY_SPLITS,
+    ) -> dict[str, Any]:
+        gross_pnl = sum(Decimal(item["gross_pnl_usd"]) for item in trades) if trades else Decimal("0")
+        net_pnl = sum(Decimal(item["net_pnl_usd"]) for item in trades) if trades else Decimal("0")
+        fees = sum(Decimal(item["fees_usd"]) for item in trades) if trades else Decimal("0")
+        slippage = sum(Decimal(item["slippage_usd"]) for item in trades) if trades else Decimal("0")
+        notional = sum(Decimal(item["filled_notional_usd"]) for item in trades) if trades else Decimal("0")
+        split_metrics: dict[str, dict[str, Any]] = {}
+        for split_name in split_names:
+            split_trades = [item for item in trades if item["split"] == split_name]
+            split_metrics[split_name] = {
+                "trade_count": len(split_trades),
+                "net_pnl_usd": _format_decimal(
+                    sum(Decimal(item["net_pnl_usd"]) for item in split_trades)
+                    if split_trades
+                    else Decimal("0")
+                ),
+            }
+
+        return {
+            "trade_count": len(trades),
+            "rejection_count": len(rejections),
+            "stale_rejection_count": sum(1 for item in rejections if "stale" in item["reason"]),
+            "gross_pnl_usd": _format_decimal(gross_pnl),
+            "net_pnl_usd": _format_decimal(net_pnl),
+            "fees_usd": _format_decimal(fees),
+            "slippage_usd": _format_decimal(slippage),
+            "filled_notional_usd": _format_decimal(notional),
+            "baseline": assumptions["baseline"],
+            "splits": split_metrics,
+        }
+
+    def observe_paper_trades(
+        self,
+        candidate_trades: list[dict[str, Any]],
+        assumptions: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        observed_trades: list[dict[str, Any]] = []
+        missed_fills: list[dict[str, Any]] = []
+        expected_fill_ratio = self._decimal_text(assumptions.get("partial_fill_ratio"))
+        expected_slippage_bps = self._decimal_text(assumptions.get("slippage_bps"))
+        fee_bps = self._decimal_text(assumptions.get("fee_bps"))
+
+        for trade in candidate_trades:
+            signal_strength = self._decimal_text(trade.get("signal_strength_bps")).copy_abs()
+            direction_penalty = Decimal("0.03") if trade.get("direction") == "CONVERGENCE" else Decimal("0")
+            observed_fill_ratio = max(
+                Decimal("0.10"),
+                min(
+                    Decimal("1"),
+                    expected_fill_ratio
+                    - Decimal("0.04")
+                    - direction_penalty
+                    + min(signal_strength / Decimal("30000"), Decimal("0.06")),
+                ),
+            )
+            if observed_fill_ratio < Decimal("0.15"):
+                missed_fills.append(
+                    {
+                        "market_id": trade["market_id"],
+                        "reason": "missed_fill",
+                        "signal_index": trade["signal_index"],
+                        "signal_time": trade["signal_time"],
+                        "expected_fill_ratio": _format_decimal(expected_fill_ratio),
+                        "observed_fill_ratio": _format_decimal(observed_fill_ratio),
+                    }
+                )
+                continue
+
+            observed_slippage_bps = (
+                expected_slippage_bps
+                + Decimal("1.5")
+                + min(signal_strength / Decimal("1200"), Decimal("8"))
+                + (Decimal("1.5") if trade.get("direction") == "CONVERGENCE" else Decimal("0"))
+            )
+            scaling = _safe_divide(observed_fill_ratio, self._decimal_text(trade["partial_fill_ratio"]))
+            quantity = self._decimal_text(trade["quantity"]) * scaling
+            observed_notional = self._decimal_text(trade["filled_notional_usd"]) * scaling
+            entry_price = self._decimal_text(trade["entry_price"])
+            exit_price = self._decimal_text(trade["exit_price"])
+            slippage_delta_bps = observed_slippage_bps - expected_slippage_bps
+            if trade["direction"] == "SHORT":
+                adjusted_entry = entry_price * (Decimal("1") - (slippage_delta_bps / Decimal("10000")))
+                gross_pnl = quantity * (adjusted_entry - exit_price)
+                adverse_selection = max(
+                    Decimal("0"),
+                    ((exit_price - adjusted_entry) / max(adjusted_entry, Decimal("0.00000001"))) * Decimal("10000"),
+                )
+            else:
+                adjusted_entry = entry_price * (Decimal("1") + (slippage_delta_bps / Decimal("10000")))
+                gross_pnl = quantity * (exit_price - adjusted_entry)
+                adverse_selection = max(
+                    Decimal("0"),
+                    ((adjusted_entry - exit_price) / max(adjusted_entry, Decimal("0.00000001"))) * Decimal("10000"),
+                )
+
+            fees = observed_notional * fee_bps / Decimal("10000")
+            slippage = observed_notional * observed_slippage_bps / Decimal("10000")
+            observed_trade = dict(trade)
+            observed_trade.update(
+                {
+                    "split": STRATEGY_REPLAY_PAPER_SPLIT,
+                    "quantity": _format_decimal(quantity),
+                    "filled_notional_usd": _format_decimal(observed_notional),
+                    "fees_usd": _format_decimal(fees),
+                    "slippage_usd": _format_decimal(slippage),
+                    "gross_pnl_usd": _format_decimal(gross_pnl),
+                    "net_pnl_usd": _format_decimal(gross_pnl - fees - slippage),
+                    "partial_fill_ratio": _format_decimal(observed_fill_ratio),
+                    "expected_partial_fill_ratio": _format_decimal(expected_fill_ratio),
+                    "expected_slippage_bps": _format_decimal(expected_slippage_bps),
+                    "observed_slippage_bps": _format_decimal(observed_slippage_bps),
+                    "adverse_selection_bps": _format_decimal(adverse_selection),
+                }
+            )
+            observed_trades.append(observed_trade)
+
+        return observed_trades, missed_fills
+
+    def summarize_paper_metrics(
+        self,
+        *,
+        candidate_trades: list[dict[str, Any]],
+        trades: list[dict[str, Any]],
+        rejections: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        trade_count = len(trades)
+        gross_pnl = sum((self._decimal_text(item["gross_pnl_usd"]) for item in trades), Decimal("0"))
+        net_pnl = sum((self._decimal_text(item["net_pnl_usd"]) for item in trades), Decimal("0"))
+        fees = sum((self._decimal_text(item["fees_usd"]) for item in trades), Decimal("0"))
+        slippage = sum((self._decimal_text(item["slippage_usd"]) for item in trades), Decimal("0"))
+        notional = sum((self._decimal_text(item["filled_notional_usd"]) for item in trades), Decimal("0"))
+        avg_fill_ratio = _safe_divide(
+            sum((self._decimal_text(item["partial_fill_ratio"]) for item in trades), Decimal("0")),
+            Decimal(trade_count),
+        )
+        avg_slippage_bps = _safe_divide(
+            sum((self._decimal_text(item.get("observed_slippage_bps")) for item in trades), Decimal("0")),
+            Decimal(trade_count),
+        )
+        avg_adverse_selection_bps = _safe_divide(
+            sum((self._decimal_text(item.get("adverse_selection_bps")) for item in trades), Decimal("0")),
+            Decimal(trade_count),
+        )
+        paper_days = Decimal("0")
+        if trades:
+            start_time = parse_datetime(trades[0]["signal_time"])
+            end_time = parse_datetime(trades[-1]["exit_time"])
+            if start_time is not None and end_time is not None and end_time >= start_time:
+                paper_days = Decimal(str((end_time - start_time).total_seconds())) / Decimal("86400")
+
+        return {
+            "candidate_trade_count": len(candidate_trades),
+            "trade_count": trade_count,
+            "missed_fill_count": sum(1 for item in rejections if item["reason"] == "missed_fill"),
+            "rejection_count": len(rejections),
+            "gross_pnl_usd": _format_decimal(gross_pnl),
+            "net_pnl_usd": _format_decimal(net_pnl),
+            "fees_usd": _format_decimal(fees),
+            "slippage_usd": _format_decimal(slippage),
+            "filled_notional_usd": _format_decimal(notional),
+            "avg_fill_ratio": _format_decimal(avg_fill_ratio),
+            "avg_observed_slippage_bps": _format_decimal(avg_slippage_bps),
+            "avg_adverse_selection_bps": _format_decimal(avg_adverse_selection_bps),
+            "paper_days": _format_decimal(paper_days, places="0.0001"),
+        }
+
+    def build_paper_drift_report(
+        self,
+        *,
+        experiment_id: str,
+        paper_run_id: str,
+        backtest_run_id: str,
+        reference_assumptions: dict[str, Any],
+        reference_metrics: dict[str, Any],
+        paper_metrics: dict[str, Any],
+        paper_rejections: list[dict[str, Any]],
+        report_version: int,
+        created_at: Optional[datetime] = None,
+    ) -> dict[str, Any]:
+        expected_fill_ratio = self._decimal_text(reference_assumptions.get("partial_fill_ratio"))
+        expected_slippage_bps = self._decimal_text(reference_assumptions.get("slippage_bps"))
+        observed_fill_ratio = self._decimal_text(paper_metrics["avg_fill_ratio"])
+        observed_slippage_bps = self._decimal_text(paper_metrics["avg_observed_slippage_bps"])
+        fill_ratio_delta = observed_fill_ratio - expected_fill_ratio
+        slippage_delta_bps = observed_slippage_bps - expected_slippage_bps
+        paper_trade_count = int(paper_metrics["trade_count"])
+        paper_rejection_rate = _safe_divide(
+            Decimal(len(paper_rejections)),
+            Decimal(paper_trade_count + len(paper_rejections)),
+        )
+        backtest_trade_count = int(reference_metrics["trade_count"])
+        backtest_rejection_count = int(reference_metrics["rejection_count"])
+        backtest_rejection_rate = _safe_divide(
+            Decimal(backtest_rejection_count),
+            Decimal(backtest_trade_count + backtest_rejection_count),
+        )
+        checks = {
+            "paper_trade_count_positive": {
+                "passed": paper_trade_count > 0,
+                "observed": paper_trade_count,
+                "required": "> 0",
+            },
+            "paper_pnl_positive_after_fees": {
+                "passed": self._decimal_text(paper_metrics["net_pnl_usd"]) > 0,
+                "observed": paper_metrics["net_pnl_usd"],
+                "required": "> 0",
+            },
+            "fill_model_error_below_threshold": {
+                "passed": fill_ratio_delta.copy_abs() <= Decimal("0.12")
+                and slippage_delta_bps.copy_abs() <= Decimal("12"),
+                "observed": {
+                    "fill_ratio_delta": _format_decimal(fill_ratio_delta),
+                    "slippage_delta_bps": _format_decimal(slippage_delta_bps),
+                },
+                "required": {
+                    "max_abs_fill_ratio_delta": "0.12",
+                    "max_abs_slippage_delta_bps": "12",
+                },
+            },
+            "adverse_selection_acceptable": {
+                "passed": self._decimal_text(paper_metrics["avg_adverse_selection_bps"]) <= Decimal("35"),
+                "observed": paper_metrics["avg_adverse_selection_bps"],
+                "required": "<= 35",
+            },
+            "rejection_rate_drift_within_limit": {
+                "passed": (paper_rejection_rate - backtest_rejection_rate).copy_abs() <= Decimal("0.25"),
+                "observed": {
+                    "paper_rejection_rate": _format_decimal(paper_rejection_rate),
+                    "backtest_rejection_rate": _format_decimal(backtest_rejection_rate),
+                },
+                "required": "abs(delta) <= 0.25",
+            },
+        }
+        failed_checks = [name for name, item in checks.items() if not item["passed"]]
+        status = "ACCEPTABLE" if not failed_checks else "DRIFTED"
+        report_id = self._build_paper_drift_report_id(
+            experiment_id=experiment_id,
+            paper_run_id=paper_run_id,
+            backtest_run_id=backtest_run_id,
+            fill_ratio_delta=_format_decimal(fill_ratio_delta),
+            slippage_delta_bps=_format_decimal(slippage_delta_bps),
+            report_version=report_version,
+        )
+        notes: list[str] = []
+        if "paper_trade_count_positive" in failed_checks:
+            notes.append("paper trading produced no executable fills")
+        if "paper_pnl_positive_after_fees" in failed_checks:
+            notes.append("paper PnL is non-positive after fees and slippage")
+        if "fill_model_error_below_threshold" in failed_checks:
+            notes.append("observed paper fill behavior drifted materially from backtest assumptions")
+        if "adverse_selection_acceptable" in failed_checks:
+            notes.append("paper fills experienced too much adverse selection")
+        if "rejection_rate_drift_within_limit" in failed_checks:
+            notes.append("paper rejection rate diverged too far from the reference backtest")
+
+        return {
+            "report_id": report_id,
+            "created_at": format_datetime(created_at or utc_now()) or "",
+            "status": status,
+            "experiment_id": experiment_id,
+            "paper_run_id": paper_run_id,
+            "backtest_run_id": backtest_run_id,
+            "reference": {
+                "expected_partial_fill_ratio": _format_decimal(expected_fill_ratio),
+                "expected_slippage_bps": _format_decimal(expected_slippage_bps),
+                "backtest_trade_count": backtest_trade_count,
+                "backtest_rejection_count": backtest_rejection_count,
+                "backtest_net_pnl_usd": reference_metrics["net_pnl_usd"],
+            },
+            "paper_metrics": paper_metrics,
+            "drift_metrics": {
+                "fill_ratio_delta": _format_decimal(fill_ratio_delta),
+                "slippage_delta_bps": _format_decimal(slippage_delta_bps),
+                "paper_rejection_rate": _format_decimal(paper_rejection_rate),
+                "backtest_rejection_rate": _format_decimal(backtest_rejection_rate),
+            },
+            "checks": checks,
+            "failed_checks": failed_checks,
+            "notes": notes,
+        }
 
     def _load_histories(
         self,
@@ -209,13 +968,15 @@ class StrategyReplayService:
         history_fingerprint_rows: list[dict[str, Any]] = []
         for market_id in self._market_ids_for_experiment(experiment, validation_error=validation_error):
             points: list[HistoryPoint] = []
-            for row in self.market_store.load_history(market_id):
-                recorded_at = parse_datetime(row.get("recorded_at"))
-                if recorded_at is None or recorded_at > end_time:
-                    continue
+            for history_point in self.market_history.get_market_metadata_history(
+                market_id,
+                start=start_time,
+                end=end_time,
+            ):
+                recorded_at = history_point.recorded_at
                 if start_time is not None and recorded_at <= start_time:
                     continue
-                record = NormalizedMarketRecord.from_dict(row["record"])
+                record = history_point.record
                 market_end_time = parse_datetime(record.end_time)
                 if market_end_time is not None and recorded_at > market_end_time:
                     raise validation_error(
@@ -625,3 +1386,19 @@ class StrategyReplayService:
         if start <= 0:
             return Decimal("0")
         return ((end - start) / start) * Decimal("10000")
+
+    def _build_paper_drift_report_id(
+        self,
+        *,
+        experiment_id: str,
+        paper_run_id: str,
+        backtest_run_id: str,
+        fill_ratio_delta: str,
+        slippage_delta_bps: str,
+        report_version: int,
+    ) -> str:
+        basis = (
+            f"{experiment_id}:{paper_run_id}:{backtest_run_id}:"
+            f"{fill_ratio_delta}:{slippage_delta_bps}:{report_version}"
+        )
+        return f"drift-{hashlib.sha256(basis.encode('utf-8')).hexdigest()[:12]}"

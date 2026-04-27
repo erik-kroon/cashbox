@@ -100,7 +100,10 @@ class StrategyReplayServiceTests(unittest.TestCase):
             liquidity="100",
         )
 
-        assumptions = _valid_assumptions()
+        assumptions = self.replay.normalize_assumptions(
+            _valid_assumptions(),
+            validation_error=self._validation_error,
+        )
         backtest_batch = self.replay.load_backtest_histories(
             experiment,
             baseline_manifest.dataset_id,
@@ -118,21 +121,48 @@ class StrategyReplayServiceTests(unittest.TestCase):
             end_dataset_id=self.market_store.load_manifest().dataset_id,
             validation_error=self._validation_error,
         )
-        paper_result = self.replay.replay_strategy(
+        paper_result = self.replay.replay_paper_strategy(
             experiment,
             assumptions,
             paper_window.histories,
-            split_name_fn=lambda _index, _total: "paper",
             validation_error=self._validation_error,
+        )
+        drift_report = self.replay.build_paper_drift_report(
+            experiment_id=experiment["experiment_id"],
+            paper_run_id="paper-test",
+            backtest_run_id="bt-test",
+            reference_assumptions=assumptions,
+            reference_metrics=backtest_result.metrics,
+            paper_metrics=paper_result.metrics,
+            paper_rejections=paper_result.rejections,
+            report_version=1,
+            created_at=datetime(2026, 4, 24, 10, 55, tzinfo=timezone.utc),
         )
 
         self.assertGreaterEqual(backtest_batch.timeline_points, 2)
         self.assertGreaterEqual(paper_window.timeline_points, 2)
         self.assertGreaterEqual(len(backtest_result.trades), 1)
         self.assertGreaterEqual(len(paper_result.trades), 1)
+        self.assertEqual(backtest_result.metrics["trade_count"], len(backtest_result.trades))
+        self.assertEqual(paper_result.metrics["candidate_trade_count"], len(paper_result.candidate_trades))
         self.assertTrue(all(trade["split"] in {"train", "validation", "test"} for trade in backtest_result.trades))
         self.assertTrue(all(trade["split"] == "paper" for trade in paper_result.trades))
         self.assertEqual(paper_window.source_window["start_dataset_id"], baseline_manifest.dataset_id)
+        self.assertEqual(drift_report["paper_run_id"], "paper-test")
+        self.assertEqual(drift_report["reference"]["backtest_trade_count"], backtest_result.metrics["trade_count"])
+        self.assertIn(drift_report["status"], {"ACCEPTABLE", "DRIFTED"})
+
+    def test_replay_service_rejects_non_chronological_assumptions(self) -> None:
+        assumptions = _valid_assumptions()
+        assumptions["split_method"] = "random"
+
+        with self.assertRaises(ValueError) as context:
+            self.replay.normalize_assumptions(
+                assumptions,
+                validation_error=self._validation_error,
+            )
+
+        self.assertEqual(str(context.exception), "split_method must be chronological")
 
     def _validation_error(self, message: str, **_: object) -> Exception:
         return ValueError(message)

@@ -442,10 +442,31 @@ Responsibilities:
 - Human approvals for capital limit changes.
 - Policy versioning.
 - Emergency halt management.
-- Audit log review.
 - Role-based access control.
 
-### 7.14 `dashboard`
+### 7.14 `audit-trail-service`
+
+Purpose: reconstruct audit consoles and domain timelines from append-only module records.
+
+Responsibilities:
+
+- Load governance, gateway, execution, and risk audit events.
+- Reconstruct chronological experiment, backtest, paper, risk, execution, and governance timelines.
+- Resolve related identifiers across experiment, market, intent, decision, execution, and governance request references.
+- Provide shared read models for CLI and dashboard audit views.
+
+### 7.15 `operator-evidence-service`
+
+Purpose: aggregate operator-facing evidence without coupling health, dashboards, or incident tooling to governance internals.
+
+Responsibilities:
+
+- Read gateway audit evidence through the audit trail service.
+- Read active risk and execution policies through governance's policy interface.
+- Summarize experiment, backtest, paper, execution, reconciliation, and pending governance state.
+- Provide shared evidence read models for health checks, future dashboards, and incident tooling.
+
+### 7.16 `dashboard`
 
 Purpose: read-only and controlled admin UI.
 

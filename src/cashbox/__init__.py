@@ -1,5 +1,11 @@
 """Cashbox market ingest and research read path."""
 
+from .audit import (
+    AuditTrailService,
+    AuditTrailServiceError,
+    AuditTrailValidationError,
+    build_audit_trail_service,
+)
 from .backtests import (
     BACKTEST_RUN_STATUSES,
     BACKTEST_SIMULATION_LEVELS,
@@ -58,7 +64,9 @@ from .gateway import (
     build_agent_gateway,
 )
 from .ingest import FileSystemMarketStore, ingest_polymarket_markets
+from .market_history import FileSystemMarketHistory, MarketMetadataPoint
 from .models import IngestHealthReport, MarketDatasetManifest, MarketFilter, NormalizedMarketRecord
+from .operator_evidence import OperatorEvidenceService, build_operator_evidence_service
 from .paper import (
     PAPER_DRIFT_STATUSES,
     PAPER_ENGINE_VERSION,
@@ -70,8 +78,19 @@ from .paper import (
     PaperValidationError,
     build_paper_service,
 )
-from .research import ResearchMarketReadPath
-from .runtime import CashboxWorkspace, build_workspace
+from .research import MarketHistoryReadStore, ResearchMarketReader, ResearchMarketReadPath
+from .runtime import (
+    CashboxWorkspace,
+    ExecutionGovernanceModule,
+    ExperimentReplayModule,
+    MarketResearchModule,
+    OperatorEvidenceModule,
+    build_execution_governance_module,
+    build_experiment_replay_module,
+    build_market_research_module,
+    build_operator_evidence_module,
+    build_workspace,
+)
 from .risk import (
     HUMAN_REVIEW_DECISIONS,
     LIVE_TRADING_EXPERIMENT_STATUSES,
@@ -85,7 +104,15 @@ from .risk import (
     RiskValidationError,
     build_risk_gateway_service,
 )
-from .strategy_replay import HistoryPoint, StrategyReplayService
+from .strategy_replay import (
+    STRATEGY_REPLAY_PAPER_SPLIT,
+    STRATEGY_REPLAY_SIMULATION_LEVELS,
+    STRATEGY_REPLAY_SPLITS,
+    HistoryPoint,
+    PaperReplayResult,
+    StrategyReplayResult,
+    StrategyReplayService,
+)
 
 __all__ = [
     "BACKTEST_RUN_STATUSES",
@@ -99,6 +126,9 @@ __all__ = [
     "PAPER_RUN_STATUSES",
     "RISK_DECISION_OUTCOMES",
     "RISK_POLICY_VERSION",
+    "STRATEGY_REPLAY_PAPER_SPLIT",
+    "STRATEGY_REPLAY_SIMULATION_LEVELS",
+    "STRATEGY_REPLAY_SPLITS",
     "AgentAuthenticationError",
     "AgentAuthorizationError",
     "AgentExecutionError",
@@ -106,6 +136,9 @@ __all__ = [
     "AgentInputError",
     "AgentMarketGateway",
     "AgentRateLimitError",
+    "AuditTrailService",
+    "AuditTrailServiceError",
+    "AuditTrailValidationError",
     "BacktestNotFoundError",
     "BacktestService",
     "BacktestServiceError",
@@ -121,14 +154,17 @@ __all__ = [
     "ExecutionServiceError",
     "ExecutionValidationError",
     "ExperimentFilter",
+    "ExecutionGovernanceModule",
     "ExperimentLifecycleError",
     "ExperimentNotFoundError",
     "ExperimentResearchNote",
+    "ExperimentReplayModule",
     "ExperimentService",
     "ExperimentServiceError",
     "ExperimentStatusEvent",
     "ExperimentValidationError",
     "FileSystemMarketStore",
+    "FileSystemMarketHistory",
     "FileSystemAgentGatewayStore",
     "FileSystemBacktestStore",
     "FileSystemExecutionStore",
@@ -138,14 +174,21 @@ __all__ = [
     "IngestHealthReport",
     "MarketDatasetManifest",
     "MarketFilter",
+    "MarketMetadataPoint",
+    "MarketResearchModule",
     "NormalizedMarketRecord",
+    "OperatorEvidenceModule",
+    "OperatorEvidenceService",
     "PaperNotFoundError",
+    "PaperReplayResult",
     "PaperService",
     "PaperServiceError",
     "PaperValidationError",
     "PROMOTION_TARGET_STAGES",
     "READ_ONLY_TOOL_NAMES",
     "ResearchMarketReadPath",
+    "ResearchMarketReader",
+    "MarketHistoryReadStore",
     "RiskGatewayService",
     "RiskNotFoundError",
     "RiskService",
@@ -153,14 +196,21 @@ __all__ = [
     "RiskValidationError",
     "STRATEGY_TEMPLATES",
     "StrategyReplayService",
+    "StrategyReplayResult",
     "FileSystemRiskStore",
     "HUMAN_REVIEW_DECISIONS",
     "LIVE_TRADING_EXPERIMENT_STATUSES",
     "build_backtest_service",
+    "build_execution_governance_module",
     "build_evaluator_service",
+    "build_experiment_replay_module",
     "build_execution_service",
     "build_agent_gateway",
+    "build_audit_trail_service",
     "build_experiment_service",
+    "build_market_research_module",
+    "build_operator_evidence_module",
+    "build_operator_evidence_service",
     "build_paper_service",
     "build_risk_gateway_service",
     "build_workspace",

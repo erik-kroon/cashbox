@@ -11,7 +11,7 @@ from .experiments import ExperimentService, LIVE_TRADING_PERMITTED_EXPERIMENT_ST
 from .ingest import FileSystemMarketStore
 from .models import format_datetime, parse_datetime, utc_now
 from .persistence import append_jsonl, canonical_copy, canonical_json, read_json, read_jsonl, write_json
-from .research import ResearchMarketReadPath
+from .research import ResearchMarketReader
 
 RISK_POLICY_VERSION = 1
 RISK_DECISION_OUTCOMES = ("ALLOW", "REJECT", "PENDING_HUMAN_APPROVAL")
@@ -171,7 +171,7 @@ class RiskGatewayService:
         *,
         experiments: ExperimentService,
         market_store: FileSystemMarketStore,
-        read_path: ResearchMarketReadPath,
+        read_path: ResearchMarketReader,
     ) -> None:
         self.store = store
         self.experiments = experiments
